@@ -1,4 +1,32 @@
-"""RuleEngine.run_scripts: 命中/规范化/截断/超时/异常 (真实子进程, 无需 DB/Redis)."""
+"""规则管理: 规则引擎脚本规则执行 (命中/规范化/截断/超时/异常隔离) 测试
+
+    :Preparation
+        1. 经 RuleEngine.run_scripts 以真实子进程执行脚本, 不依赖 DB/Redis, 用 monkeypatch 设置 RULE_SCRIPT_DIR;
+        2. 使用 backend/rules_scripts 下的 oom_burst.py, 以及 tmp_path 临时编写的脚本;
+        3. 用 _rule() 直接构造脚本规则对象 (不经数据库)。
+
+    :TestStep
+        1. 用 oom_burst.py (阈值 3, 窗口 60s) 对 4 条 OOM 条目执行;
+        2. 传入非脚本规则 (keyword) 执行;
+        3. 传入 sleep(3) 的慢脚本, 超时设为 1s;
+        4. 传入路径穿越的 script_path;
+        5. 一条坏脚本 + 一条正常脚本并发执行;
+        6. 用脚本产出 message/非法 severity/越界 line_no/非对象条目;
+        7. 用脚本产出 5 条 findings, 并将 SCRIPT_MAX_FINDINGS 设为 2。
+
+    :ExpectResult
+        1. 命中 1 条 (severity=critical, line_no=4), 无错误, 记录耗时, logs 前缀含规则名, 健康分 90;
+        2. 无脚本规则 → findings/errors/durations 均为空 (no-op);
+        3. 记录 1 条错误且含 "超时";
+        4. 记录 1 条错误且含 "逃逸";
+        5. 命中 1 条 + 错误 1 条, 错误归属正确的规则名, durations 记录 2 条 (规则间互不影响);
+        6. findings 归一化: message 覆盖 raw、非法 severity 回退 warn、保留越界 line_no、非对象条目被忽略并记日志;
+        7. findings 截断为 2 条, 并记录 "截断" 日志。
+
+    :AfterTest
+        1. monkeypatch 自动还原, tmp_path 自动清理;
+        2. 不写 DB/Redis, 不改动 rules_scripts 目录。
+"""
 import asyncio
 from pathlib import Path
 

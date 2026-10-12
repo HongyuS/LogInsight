@@ -1,13 +1,36 @@
-"""script_runner 子进程契约: 正常命中 / 缺 check / 缺文件 / 路径穿越 / 返回类型非法.
+"""规则管理: 脚本执行器 (script_runner) 子进程契约测试
 
-以真实子进程方式调用, 与 Worker 运行时路径一致。
+    :Preparation
+        1. 以真实子进程方式调用 app/modules/diagnosis/script_runner.py, 与 Worker 运行时一致, 不依赖 DB/Redis;
+        2. 脚本根目录使用 backend/rules_scripts (含 oom_burst.py), 另用 tmp_path 临时编写非法脚本;
+        3. 调用载荷 {script_root, script_path, ctx} 经 stdin 以 JSON 传入。
+
+    :TestStep
+        1. 运行 oom_burst.py, 传入 4 条 "Out of memory" 条目(60s 窗口内)与阈值参数;
+        2. 运行缺少 check(ctx) 函数的脚本;
+        3. 运行不存在的脚本文件;
+        4. 运行路径穿越的脚本 (../secret.py);
+        5. 运行 check 返回 list 的脚本;
+        6. 运行 check 返回 None 的脚本。
+
+    :ExpectResult
+        1. 退出码 0, ok=true, 命中 1 条 finding(line_no=4, 含 "4 次 OOM")且带 logs;
+        2. 退出码 1, ok=false, error 含 "check(ctx)";
+        3. 退出码 1, ok=false, error 含 "不存在";
+        4. 退出码 1, ok=false, error 含 "逃逸";
+        5. 退出码 1, ok=false, error 含 "dict";
+        6. 退出码 0, ok=true, result 为空 findings/logs。
+
+    :AfterTest
+        1. tmp_path 由 pytest 自动清理;
+        2. 不写 DB/Redis, 不改动 rules_scripts 目录。
 """
 import json
 import subprocess
 import sys
 from pathlib import Path
 
-BACKEND = Path(__file__).resolve().parents[2]  # tests/diagnosis/ -> backend/
+BACKEND = Path(__file__).resolve().parents[2]  # tests/rule_management/ -> backend/
 RUNNER = BACKEND / "app" / "modules" / "diagnosis" / "script_runner.py"
 SCRIPTS_DIR = BACKEND / "rules_scripts"
 
