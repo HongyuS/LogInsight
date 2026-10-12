@@ -115,7 +115,7 @@ async def seed_demo_metrics() -> None:
 
 
 async def seed_builtin_rules() -> None:
-    """内置预置规则 (幂等): 常见故障模式, 涵盖关键字/正则/阈值三类匹配."""
+    """内置预置规则 (幂等): 常见故障模式, 涵盖关键字/正则/阈值/脚本四类匹配."""
     from app.models.rule import MatchType, Rule, Severity
 
     BUILTIN_RULES = [
@@ -130,6 +130,14 @@ async def seed_builtin_rules() -> None:
         ("服务启动失败", "systemd 服务启动失败记录",
          MatchType.keyword, "Failed with result", {}, Severity.error, "syslog", 40),
     ]
+    # 脚本规则 (match_type=script): script_path 指向 rules_scripts/ 下随仓库发布的脚本
+    BUILTIN_SCRIPT_RULES = [
+        ("OOM 突发检测", "窗口内 OOM 重复次数超阈值告警 (关键字/正则难以表达的时序场景)",
+         "oom_burst.py", {"window_seconds": 60, "threshold": 3, "keyword": "Out of memory"},
+         Severity.critical, "syslog", 50),
+        ("时钟漂移检测", "同一日志内时间戳回退, 预示时钟漂移/时区错乱",
+         "clock_skew.py", {"min_back_seconds": 5, "max_report": 20}, Severity.warn, "syslog", 60),
+    ]
     async with AsyncSessionLocal() as db:
         for name, desc, mtype, pattern, threshold, sev, log_type, prio in BUILTIN_RULES:
             exists = (await db.execute(select(Rule).where(Rule.name == name))).scalar_one_or_none()
@@ -137,6 +145,15 @@ async def seed_builtin_rules() -> None:
                 db.add(Rule(
                     name=name, description=desc, match_type=mtype, pattern=pattern,
                     threshold=threshold, severity=sev, log_type=log_type,
+                    priority=prio, enabled=True, is_builtin=True,
+                ))
+        for name, desc, script_path, params, sev, log_type, prio in BUILTIN_SCRIPT_RULES:
+            exists = (await db.execute(select(Rule).where(Rule.name == name))).scalar_one_or_none()
+            if exists is None:
+                db.add(Rule(
+                    name=name, description=desc, match_type=MatchType.script,
+                    pattern="", threshold={}, script_path=script_path, script_params=params,
+                    script_timeout=5, severity=sev, log_type=log_type,
                     priority=prio, enabled=True, is_builtin=True,
                 ))
         await db.commit()
