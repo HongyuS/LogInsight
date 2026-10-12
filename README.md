@@ -117,17 +117,37 @@ docker compose up -d       # 拉起 postgres / redis / api / worker / web
 ```
 KunpengRobot/
 ├── backend/
-│   └── app/
-│       ├── api/            # 认证/用户/团队/通知/审计/工作台/资产库/任务/
-│       │                   # 聚合分析+LLM+SSE/规则/指标
-│       ├── core/           # 配置 / 安全 / 数据库 / 双级 RBAC 依赖注入
-│       ├── models/         # 用户-角色-权限 / 团队-成员-通知-资产库 / 任务 /
-│       │                   # 解析事件 / 规则 / 指标 / 用户偏好 / 审计
-│       ├── queue/          # Redis Stream 任务队列
-│       ├── events/         # 事件总线（Pub/Sub + Stream 留存）
-│       ├── modules/        # analyze：6 解析器插件 / 聚合 / 五段报告 / 演示日志
-│       ├── worker/         # Worker 消费循环 + 定时调度
-│       └── metrics/        # 指标分区管理
+│   ├── app/
+│   │   ├── api/            # 认证/用户/团队/通知/审计/工作台/资产库/任务/
+│   │   │                   # 聚合分析+LLM+SSE/规则/指标
+│   │   ├── core/           # 配置 / 安全 / 数据库 / 双级 RBAC 依赖注入 / 审计
+│   │   ├── models/         # 用户-角色-权限 / 团队-成员-通知-资产库 / 任务 /
+│   │   │                   # 解析事件 / 规则 / 指标 / 用户偏好 / 审计
+│   │   ├── queue/          # Redis Stream 任务队列
+│   │   ├── events/         # 事件总线（Pub/Sub + Stream 留存）
+│   │   ├── modules/        # analyze  : 6 解析器插件 / 聚合 / 五段报告 / 演示日志
+│   │   │                   # diagnosis: 诊断流水线 / 规则引擎 / 脚本执行器
+│   │   │                   # inspection:巡检流水线 / 检查项插件
+│   │   ├── worker/         # Worker 消费循环 + 定时调度
+│   │   └── metrics/        # 指标分区管理 / 查询 / 降采样
+│   ├── alembic/            # 数据库迁移（版本脚本 + env.py）
+│   ├── rules_scripts/      # 脚本规则目录（约定 check(ctx) 的脚本）
+│   ├── tests/              # 后端测试（按功能点分目录，真实 PG + Redis 运行）
+│   │   ├── auth_rbac/           # 用户权限控制（认证 + 双级 RBAC）
+│   │   ├── log_diagnosis/       # 故障诊断日志分析（解析器等）
+│   │   ├── llm_report/          # 按需 LLM 报告
+│   │   ├── log_inspection/      # 智能巡检
+│   │   ├── rule_management/     # 巡检规则管理（含脚本规则执行）
+│   │   ├── upload_stream/       # 并发上传 + 实时流式输出
+│   │   ├── metric_charts/       # 性能数据图表
+│   │   ├── team_collaboration/  # 团队协作
+│   │   │   ├── team_notice/         # 通知中心
+│   │   │   ├── asset_library/       # 资产库
+│   │   │   └── audit_log/           # 审计日志
+│   │   └── workbench/           # 工作台
+│   ├── conftest.py            # 测试基础设施（注入真实 PG / Redis 连接）
+│   ├── requirements.txt       # 运行依赖
+│   └── requirements-dev.txt   # 测试依赖（pytest 等）
 ├── frontend/               # Vue3 + TS + Pinia（o-design 风格，基于 witty-log-analyzer）
 ├── deploy/                 # docker-compose / Nginx / 裸机脚本
 └── docs/                   # 框架设计 / 功能点清单 / 界面截图
@@ -137,6 +157,7 @@ KunpengRobot/
 
 - **提交粒度**：每次提交的变动行数不超过 **1000 行**（含新增与删除）；大改动拆分为多个小提交，便于回溯与审查
 - 提交信息用中文，格式 `type(scope): 摘要`（feat / fix / docs / refactor / chore）
+- **测试目录**：后端测试按功能点分目录置于 `backend/tests/<功能点>/`（如 `auth_rbac` / `log_diagnosis` / `log_inspection`），用例以真实 PostgreSQL + Redis 运行；暂无用例的功能点用 `.gitkeep` 占位
 
 ## 后续规划
 
