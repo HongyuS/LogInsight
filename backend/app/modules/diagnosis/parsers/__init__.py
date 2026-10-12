@@ -10,6 +10,29 @@ from typing import Callable, Awaitable
 
 PARSERS: dict[str, "LogParser"] = {}
 
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def parse_timestamp(token: str) -> datetime | None:
+    """解析通用文本行时间戳: ISO 风格 (YYYY-MM-DD HH:MM:SS[.fff]) 或 syslog 风格 (Mon DD HH:MM:SS).
+
+    syslog 风格缺年份, 以当前年份兜底 (仅用于任务内相对时间比较, 不追求绝对准确)。
+    """
+    text = token.strip()
+    try:
+        return datetime.fromisoformat(text.replace(" ", "T").replace(",", "."))
+    except ValueError:
+        pass
+    parts = text.split()
+    if len(parts) == 3 and parts[0].lower() in _MONTHS:
+        try:
+            hh, mm, ss = (int(x) for x in parts[2].split(":"))
+            return datetime(datetime.now().year, _MONTHS[parts[0].lower()], int(parts[1]), hh, mm, ss)
+        except ValueError:
+            return None
+    return None
+
 
 @dataclass
 class LogEntry:
@@ -96,7 +119,8 @@ class GenericTextParser(LogParser):
                 elif level == "warn":
                     result.file_stats["warns"] += 1
                 ts_match = self.TS_PATTERN.search(line)
-                result.entries.append(LogEntry(raw=line, level=level))
+                timestamp = parse_timestamp(ts_match.group(0)) if ts_match else None
+                result.entries.append(LogEntry(raw=line, timestamp=timestamp, level=level))
                 if len(result.entries) > 500000:  # 防内存失控, 超大文件截断
                     break
         return result
