@@ -5,7 +5,7 @@ from app.models.audit import AuditLog
 from app.models.user import User
 
 
-async def log_audit(
+def log_audit(
     db: AsyncSession,
     user: User | None,
     action: str,
@@ -15,6 +15,9 @@ async def log_audit(
     detail: dict | None = None,
 ) -> None:
     """写一条审计记录 (随调用方事务提交).
+
+    同步函数: 仅做 db.add(), 无 IO/await; 由调用方后续 await db.commit() 落库。
+    注意: 若改回 async, 必须同步为全部调用点补 await, 否则协程不会执行、审计丢失。
 
     user 为 None 时 (如登录失败), user_id 为空、user_name 传外部提供的名字.
     """
