@@ -13,6 +13,7 @@ class MatchType(str, enum.Enum):
     regex = "regex"          # 正则匹配日志行
     keyword = "keyword"      # 关键字包含
     threshold = "threshold"  # 指标阈值
+    script = "script"        # Python 脚本 (子进程执行, 见 docs/脚本规则设计.md)
 
 
 class Severity(str, enum.Enum):
@@ -34,6 +35,10 @@ class Rule(Base):
     match_type: Mapped[MatchType] = mapped_column(Enum(MatchType))
     pattern: Mapped[str] = mapped_column(Text, default="")              # 正则表达式 / 关键字
     threshold: Mapped[dict] = mapped_column(JSONB, default=dict)        # 阈值规则: {metric, op, value}
+    # 脚本规则 (match_type=script): 相对 RULE_SCRIPT_DIR 的路径 + 传参 + 超时秒数 (0=全局默认)
+    script_path: Mapped[str] = mapped_column(String(256), default="")
+    script_params: Mapped[dict] = mapped_column(JSONB, default=dict)
+    script_timeout: Mapped[int] = mapped_column(Integer, default=5)
 
     severity: Mapped[Severity] = mapped_column(Enum(Severity), default=Severity.warn)
     log_type: Mapped[str] = mapped_column(String(64), default="")       # 适用日志类型 (空=全部)

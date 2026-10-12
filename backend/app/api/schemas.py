@@ -264,6 +264,9 @@ class RuleCreate(BaseModel):
     match_type: MatchType
     pattern: str = ""
     threshold: dict = Field(default_factory=dict)
+    script_path: str = Field(default="", max_length=256)   # 仅 script 类型: 相对 RULE_SCRIPT_DIR
+    script_params: dict = Field(default_factory=dict)      # 脚本参数, ctx["rule"]["params"] 读取
+    script_timeout: int = Field(default=5, ge=0, le=300)   # 秒; 0 = 用全局 RULE_SCRIPT_TIMEOUT
     severity: Severity = Severity.warn
     log_type: str = ""
     server_type: str = ""

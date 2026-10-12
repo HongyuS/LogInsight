@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     # 指标
     METRIC_RETENTION_DAYS: int = 90
 
+    # 脚本规则 (docs/脚本规则设计.md): 脚本目录 + 子进程执行限制
+    RULE_SCRIPT_DIR: str = "./rules_scripts"   # 相对 backend 运行目录
+    RULE_SCRIPT_TIMEOUT: int = 5               # 全局默认超时 (秒), 规则级 script_timeout=0 时使用
+    RULE_SCRIPT_CONCURRENCY: int = 4           # 单 Worker 并发脚本子进程数
+    SCRIPT_MAX_ENTRIES: int = 50000            # 传给脚本的日志条目上限 (超出截断)
+    SCRIPT_MAX_BYTES: int = 16 * 1024 * 1024   # 传给脚本的上下文 JSON 序列化上限 (16MB)
+    SCRIPT_MAX_FINDINGS: int = 200             # 脚本单次输出 findings 上限
+
     # 上传限流 (按用户, Redis 计数)
     UPLOAD_RATE_LIMIT_PER_MIN: int = 30
 

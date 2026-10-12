@@ -1,5 +1,7 @@
-"""规则管理: 管理员增删改查 + 正则安全校验 + 变更审计 + 版本热加载."""
+"""规则管理: 管理员增删改查 + 正则安全校验 + 脚本路径校验 + 变更审计 + 版本热加载."""
+import ast
 import re
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -7,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import RuleCreate, RuleInfo, RuleUpdate
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.deps import get_current_user, get_redis
 from app.models.rule import MatchType, Rule, RuleAuditLog
@@ -16,6 +19,22 @@ router = APIRouter(prefix="/rules", tags=["rules"])
 
 # 防灾难性回溯: 禁止嵌套量子等危险模式 (保守黑名单 + 编译超时不可用时的兜底)
 DANGEROUS_REGEX = re.compile(r"(\((?:[^()]*\+|\+[^()]*)\))|(\{.*,\s*,.*\})|(?:\(\?.*\))")
+
+
+def _validate_script_path(path: str) -> None:
+    """脚本路径校验: 相对路径 + .py 后缀 + 解析后必须在脚本根目录内 (防穿越)."""
+    if not path:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "脚本规则必须有 script_path")
+    p = PurePosixPath(path.replace("\\", "/"))
+    if p.is_absolute() or ".." in p.parts or p.suffix != ".py":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "script_path 须为 .py 相对路径, 如 oom_burst.py")
+    root = Path(get_settings().RULE_SCRIPT_DIR).resolve()
+    if not (root / p).resolve().is_relative_to(root):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "script_path 不能逃逸脚本根目录")
+    if not (root / p).is_file():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"脚本文件不存在: {path} (需位于 {root})")
 
 
 def validate_rule(body: RuleCreate) -> None:
@@ -33,6 +52,44 @@ def validate_rule(body: RuleCreate) -> None:
     elif body.match_type == MatchType.threshold:
         if not {"metric", "op", "value"} <= set(body.threshold.keys()):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "阈值规则需包含 metric/op/value")
+    elif body.match_type == MatchType.script:
+        _validate_script_path(body.script_path)
+
+
+def _normalize_rule(body: RuleCreate) -> RuleCreate:
+    """按类型清理无关字段: script 清空 pattern/threshold, 其余类型还原脚本字段默认值."""
+    if body.match_type == MatchType.script:
+        body.pattern = ""
+        body.threshold = {}
+    else:
+        body.script_path = ""
+        body.script_params = {}
+        body.script_timeout = 5
+    return body
+
+
+@router.get("/scripts")
+async def list_rule_scripts(
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """扫描 RULE_SCRIPT_DIR 下可用脚本 (供前端下拉选择), 返回相对路径 + 首行 docstring."""
+    root = Path(get_settings().RULE_SCRIPT_DIR).resolve()
+    if not root.is_dir():
+        return []
+    out = []
+    for f in sorted(root.glob("*.py")):
+        if f.name.startswith("_"):
+            continue  # _shared/ 等内部模块不对外暴露
+        doc = ""
+        try:
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+            raw_doc = ast.get_docstring(tree)
+            if raw_doc:
+                doc = raw_doc.strip().splitlines()[0]
+        except (OSError, SyntaxError, ValueError):
+            pass
+        out.append({"path": f.name, "doc": doc})
+    return out
 
 
 @router.get("", response_model=list[RuleInfo])
@@ -56,9 +113,11 @@ async def create_rule(
     if "rule:manage" not in {p.code for r in user.roles for p in r.permissions}:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要规则管理权限")
     validate_rule(body)
+    _normalize_rule(body)
     max_version = (await db.execute(select(func.max(Rule.version)))).scalar() or 0
     rule = Rule(**body.model_dump(), version=max_version + 1, created_by=user.id)
     db.add(rule)
+    await db.flush()  # 先落库生成 rule.id, 审计日志外键依赖它
     db.add(RuleAuditLog(rule_id=rule.id, rule_name=rule.name, action="create",
                         operator_id=user.id, detail=body.model_dump()))
     await db.commit()
@@ -76,6 +135,7 @@ async def update_rule(
     if "rule:manage" not in {p.code for r in user.roles for p in r.permissions}:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要规则管理权限")
     validate_rule(body)
+    _normalize_rule(body)
     rule = (await db.execute(select(Rule).where(Rule.id == rule_id))).scalar_one_or_none()
     if rule is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "规则不存在")
