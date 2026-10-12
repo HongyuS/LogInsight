@@ -12,9 +12,12 @@ interface RuleRow {
   id: number
   name: string
   description: string
-  matchType: 'keyword' | 'regex' | 'threshold'
+  matchType: 'keyword' | 'regex' | 'threshold' | 'script'
   pattern: string
   threshold: Record<string, any>
+  scriptPath: string
+  scriptParams: Record<string, any>
+  scriptTimeout: number
   severity: 'info' | 'warn' | 'error' | 'critical'
   logType: string
   serverType: string
@@ -25,9 +28,12 @@ interface RuleRow {
   createdAt: string
 }
 
-const MATCH_LABEL: Record<RuleRow['matchType'], string> = { keyword: '关键字', regex: '正则', threshold: '阈值' }
+const MATCH_LABEL: Record<RuleRow['matchType'], string> = {
+  keyword: '关键字', regex: '正则', threshold: '阈值', script: '脚本',
+}
 const MATCH_BADGE: Record<RuleRow['matchType'], string> = {
   keyword: 'o-badge--outline', regex: 'o-badge--primary', threshold: 'o-badge--warning',
+  script: 'o-badge--brand',
 }
 const SEV_LABEL: Record<RuleRow['severity'], string> = { info: '提示', warn: '警告', error: '错误', critical: '严重' }
 const SEV_BADGE: Record<RuleRow['severity'], string> = {
@@ -38,6 +44,7 @@ const OPS = ['>', '>=', '<', '<=', '==', '!=']
 const rules = ref<RuleRow[]>([])
 const loading = ref(false)
 const loadErr = ref('')
+const scriptOptions = ref<{ path: string; doc: string }[]>([])
 
 async function load() {
   loading.value = true
@@ -50,7 +57,14 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(load)
+onMounted(() => {
+  load()
+  if (canManage.value) {
+    get<{ path: string; doc: string }[]>('/rules/scripts')
+      .then(l => { scriptOptions.value = l })
+      .catch(() => { /* 脚本目录为空或不可用时保持空建议 */ })
+  }
+})
 
 /* ---------- 编辑弹窗 ---------- */
 const showEdit = ref(false)
@@ -64,6 +78,9 @@ const emptyForm = () => ({
   match_type: 'keyword' as RuleRow['matchType'],
   pattern: '',
   threshold: { metric: '', op: '>', value: 0 },
+  script_path: '',
+  script_params: '',
+  script_timeout: 5,
   severity: 'warn' as RuleRow['severity'],
   log_type: '',
   server_type: '',
@@ -80,6 +97,10 @@ function openEdit(row?: RuleRow) {
     pattern: row.pattern, threshold: { ...row.threshold }, severity: row.severity,
     log_type: row.logType, server_type: row.serverType, enabled: row.enabled,
     priority: row.priority,
+    script_path: row.scriptPath || '',
+    script_params: row.scriptParams && Object.keys(row.scriptParams).length
+      ? JSON.stringify(row.scriptParams, null, 2) : '',
+    script_timeout: row.scriptTimeout ?? 5,
   } : {})
   showEdit.value = true
 }
@@ -93,6 +114,16 @@ async function save() {
     saveErr.value = '请填写规则名称'
     return
   }
+  if (form.match_type === 'script') {
+    if (!form.script_path.trim()) {
+      saveErr.value = '请填写脚本路径'
+      return
+    }
+    if (!form.script_path.trim().endsWith('.py')) {
+      saveErr.value = '脚本路径必须以 .py 结尾'
+      return
+    }
+  }
   saveErr.value = ''
   saving.value = true
   try {
@@ -104,6 +135,24 @@ async function save() {
     if (form.match_type === 'threshold') {
       body.pattern = ''
       body.threshold = { metric: form.threshold.metric, op: form.threshold.op, value: Number(form.threshold.value) }
+    } else if (form.match_type === 'script') {
+      body.pattern = ''
+      body.threshold = {}
+      body.script_path = form.script_path.trim()
+      body.script_timeout = Number(form.script_timeout) || 0
+      body.script_params = {}
+      if (form.script_params.trim()) {
+        try {
+          const parsed = JSON.parse(form.script_params)
+          if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) {
+            throw new Error('not object')
+          }
+          body.script_params = parsed
+        } catch {
+          saveErr.value = '参数需为合法 JSON 对象，如 {"threshold": 3}'
+          return
+        }
+      }
     } else {
       body.pattern = form.pattern
       body.threshold = {}
@@ -165,10 +214,11 @@ async function remove(row: RuleRow) {
             </td>
             <td><span class="o-badge" :class="MATCH_BADGE[r.matchType]">{{ MATCH_LABEL[r.matchType] }}</span></td>
             <td>
-              <span v-if="r.matchType !== 'threshold'" class="o-mono pattern">{{ r.pattern || '—' }}</span>
-              <span v-else class="o-mono pattern">
+              <span v-if="r.matchType === 'keyword' || r.matchType === 'regex'" class="o-mono pattern">{{ r.pattern || '—' }}</span>
+              <span v-else-if="r.matchType === 'threshold'" class="o-mono pattern">
                 {{ r.threshold?.metric }} {{ r.threshold?.op }} {{ r.threshold?.value }}
               </span>
+              <span v-else class="o-mono pattern">{{ r.scriptPath || '—' }}</span>
             </td>
             <td><span class="o-badge" :class="SEV_BADGE[r.severity]">{{ SEV_LABEL[r.severity] }}</span></td>
             <td class="o-mono">{{ r.priority }}</td>
@@ -216,14 +266,14 @@ async function remove(row: RuleRow) {
           >{{ label }}</button>
         </div>
       </div>
-      <div v-if="form.match_type !== 'threshold'" class="o-form-item">
+      <div v-if="form.match_type === 'keyword' || form.match_type === 'regex'" class="o-form-item">
         <label class="o-form-item__label required">匹配内容</label>
         <input
           v-model="form.pattern" class="o-input mono-input"
           :placeholder="form.match_type === 'regex' ? '正则表达式，如 ERROR|PANIC' : '关键字，如 Out of memory'"
         />
       </div>
-      <template v-else>
+      <template v-else-if="form.match_type === 'threshold'">
         <div class="o-form-item">
           <label class="o-form-item__label required">指标名</label>
           <input v-model="form.threshold.metric" class="o-input mono-input" placeholder="如 cpu.usage" />
@@ -237,6 +287,36 @@ async function remove(row: RuleRow) {
         <div class="o-form-item">
           <label class="o-form-item__label required">阈值</label>
           <input v-model.number="form.threshold.value" type="number" class="o-input" style="width: 160px" />
+        </div>
+      </template>
+      <template v-else>
+        <div class="o-form-item">
+          <label class="o-form-item__label required">脚本路径</label>
+          <input
+            v-model="form.script_path" class="o-input mono-input" list="rule-script-list"
+            placeholder="如 oom_burst.py（相对 rules_scripts/ 目录）"
+          />
+          <datalist id="rule-script-list">
+            <option v-for="s in scriptOptions" :key="s.path" :value="s.path">{{ s.doc }}</option>
+          </datalist>
+        </div>
+        <div class="o-form-item">
+          <label class="o-form-item__label">脚本参数</label>
+          <textarea
+            v-model="form.script_params" class="o-textarea mono-input" rows="3"
+            placeholder='JSON 对象，如 {"window_seconds": 60, "threshold": 3}（可选）'
+          ></textarea>
+        </div>
+        <div class="o-form-item">
+          <label class="o-form-item__label">超时</label>
+          <input v-model.number="form.script_timeout" type="number" min="0" class="o-input" style="width: 120px" />
+          <span class="o-mono o-text-3" style="align-self: center; margin-left: 8px">秒，0 表示用全局默认</span>
+        </div>
+        <div class="o-form-item">
+          <span class="o-text-3" style="font-size: 12.5px; line-height: 1.7">
+            脚本需定义 <code class="o-mono">check(ctx)</code> 入口函数，返回
+            <code class="o-mono">{{ '{' }}findings: [...]{{ '}' }}</code>；由 Worker 以独立子进程执行。
+          </span>
         </div>
       </template>
       <div class="o-form-item">
