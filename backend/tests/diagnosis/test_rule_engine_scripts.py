@@ -6,7 +6,7 @@ from app.core.config import get_settings
 from app.models.rule import MatchType, Rule, Severity
 from app.modules.diagnosis.rule_engine import RuleEngine
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "rules_scripts"
+SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "rules_scripts"
 
 
 def _rule(**kw):

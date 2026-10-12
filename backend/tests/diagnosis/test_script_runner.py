@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-BACKEND = Path(__file__).resolve().parents[1]
+BACKEND = Path(__file__).resolve().parents[2]  # tests/diagnosis/ -> backend/
 RUNNER = BACKEND / "app" / "modules" / "diagnosis" / "script_runner.py"
 SCRIPTS_DIR = BACKEND / "rules_scripts"
 
