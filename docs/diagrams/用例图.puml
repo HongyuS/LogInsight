@@ -1,0 +1,63 @@
+@startuml 用例图
+' 鲲鹏运维平台 UML 用例图: 小人(参与者) + 椭圆(用例) + 直线关联
+left to right direction
+skinparam shadowing false
+skinparam actorStyle stickman
+skinparam usecase {
+  BackgroundColor #EAF1FB
+  BorderColor #2F5CAC
+  ArrowColor #1D2433
+}
+skinparam actor {
+  BackgroundColor #FFFFFF
+  BorderColor #1D2433
+}
+skinparam rectangle {
+  BackgroundColor #F8FAFD
+  BorderColor #94A7C4
+}
+
+actor "成员" as member
+actor "管理员" as admin
+
+rectangle "鲲鹏运维平台" {
+  ' 左列: 核心功能
+  usecase "登录认证" as UC1
+  usecase "工作台总览" as UC2
+  usecase "上传日志分析" as UC3
+  usecase "智能巡检日志" as UC4
+  usecase "查看分析报告" as UC5
+  usecase "查看性能图表" as UC6
+
+  ' 右列: 管理功能
+  usecase "用户权限管理" as UC7
+  usecase "查看审计日志" as UC8
+  usecase "成员审批" as UC9
+  usecase "规则管理" as UC10
+  usecase "资产库管理" as UC11
+}
+
+' 成员 -> 核心功能
+member --> UC1
+member --> UC2
+member --> UC3
+member --> UC4
+member --> UC5
+member --> UC6
+
+' 管理员 -> 管理功能 (并拥有成员全部权限)
+admin --> UC7
+admin --> UC8
+admin --> UC9
+admin --> UC10
+admin --> UC11
+
+note bottom of admin
+  管理员为平台管理员、队长、团队管理员
+  三类管理角色的统称,
+  拥有成员的全部权限
+end note
+note bottom of UC1
+  登录认证适用于所有角色
+end note
+@enduml
