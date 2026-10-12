@@ -102,10 +102,13 @@ async def _pipeline(db: AsyncSession, task: Task, bus: EventBus, is_cancelled) -
     if await is_cancelled():
         raise _Cancelled()
 
-    # 2. 解析 (插件识别)
+    # 2. 解析 (插件识别) + 3. 规则匹配: regex/keyword 逐文件
+    engine = await RuleEngine.load(db)  # 每任务加载最新启用规则, 天然热加载
     all_findings: list[Finding] = []
     all_metrics: list[dict] = []
     file_stats: dict = {}
+    script_entries: list[dict] = []  # 供脚本规则: 全局递增 line_no + 来源文件
+    global_line = 0
     for i, path in enumerate(files):
         if await is_cancelled():
             raise _Cancelled()
@@ -117,15 +120,39 @@ async def _pipeline(db: AsyncSession, task: Task, bus: EventBus, is_cancelled) -
             continue
         file_stats[str(path.name)] = result.file_stats
         all_metrics.extend(result.metrics)
-        # 3. 规则引擎 (按任务加载最新启用规则, 天然热加载)
-        engine = await RuleEngine.load(db)
-        findings = engine.match_entries(result.entries)
-        all_findings.extend(findings)
+        all_findings.extend(engine.match_entries(result.entries))
+        for entry in result.entries:
+            global_line += 1
+            script_entries.append({
+                "line_no": global_line,
+                "raw": entry.raw[:1000],
+                "ts": entry.timestamp.isoformat() if entry.timestamp else None,
+                "level": entry.level,
+                "component": entry.component,
+                "file": path.name,
+                "fields": entry.fields,
+            })
 
+    # 3b. 阈值规则 (指标)
+    all_findings.extend(engine.match_metrics(all_metrics))
+
+    # 3c. 脚本规则 (独立子进程执行; 失败/超时不使任务失败)
     await bus.publish(task_id, "progress", {"step": "rules", "percent": 60,
                                             "message": f"规则匹配完成, 命中 {len(all_findings)} 条"})
-    threshold_findings = RuleEngine([]).match_metrics(all_metrics)
-    all_findings.extend(threshold_findings)
+    script_outcome = await engine.run_scripts({
+        "task": {"id": task_id, "task_type": task.type.value,
+                 "server_type": task.params.get("server_type", "")},
+        "entries": script_entries,
+        "metrics": all_metrics,
+        "file_stats": file_stats,
+    })
+    all_findings.extend(script_outcome.findings)
+    for message in script_outcome.logs:
+        await bus.publish(task_id, "log", {"message": message})
+    for err in script_outcome.errors:
+        logger.error("脚本规则执行失败 rule_id=%s name=%s: %s", err.rule_id, err.rule_name, err.error)
+        await bus.publish(task_id, "warning", {
+            "message": f"脚本规则「{err.rule_name}」执行失败: {err.error}"})
 
     for f in all_findings[:100]:
         await bus.publish(task_id, "finding", {
@@ -157,7 +184,9 @@ async def _pipeline(db: AsyncSession, task: Task, bus: EventBus, is_cancelled) -
     report = Report(
         task_id=task.id, health_score=score, summary=summary,
         findings=finding_dicts,
-        content={"file_stats": file_stats, "metric_count": len(all_metrics)},
+        content={"file_stats": file_stats, "metric_count": len(all_metrics),
+                 "script_runs": script_outcome.durations,
+                 "script_errors": [vars(e) for e in script_outcome.errors]},
     )
     db.add(report)
     task.progress = 95
