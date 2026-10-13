@@ -16,6 +16,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'rules', name: 'rules', component: () => import('@/views/RulesView.vue'), meta: { title: '规则管理', perm: 'dashboard:view', menu: true } },
       { path: 'metrics', name: 'metrics', component: () => import('@/views/MetricsView.vue'), meta: { title: '性能图表', perm: 'dashboard:view', menu: true } },
       { path: 'inspection', name: 'inspection', component: () => import('@/views/InspectionView.vue'), meta: { title: '智能巡检', perm: 'dashboard:view', menu: true } },
+      { path: 'inspection/:taskId', name: 'inspection-detail', component: () => import('@/views/InspectionDetailView.vue'), meta: { title: '巡检详情', perm: 'task:view' } },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },

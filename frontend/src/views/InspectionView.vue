@@ -123,12 +123,12 @@ onBeforeUnmount(() => {
       <table class="o-table">
         <thead>
           <tr>
-            <th>任务</th><th>状态</th><th style="width: 200px">进度</th><th>日志大小</th><th>事件数</th><th>创建时间</th><th>完成时间</th>
+            <th>任务</th><th>状态</th><th style="width: 200px">进度</th><th>日志大小</th><th>事件数</th><th>创建时间</th><th>完成时间</th><th style="width: 96px">操作</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!tasks.length && !loading">
-            <td colspan="7">
+            <td colspan="8">
               <div class="o-empty" style="padding: 48px 0">
                 <div class="icon">🔍</div>
                 <div>暂无巡检任务 — 上传日志包发起第一次巡检</div>
@@ -158,6 +158,9 @@ onBeforeUnmount(() => {
             <td class="o-mono">{{ t.eventCount || '—' }}</td>
             <td class="o-mono o-text-3">{{ fmtTime(t.createdAt) }}</td>
             <td class="o-mono o-text-3">{{ t.finishedAt ? fmtTime(t.finishedAt) : '—' }}</td>
+            <td>
+              <router-link class="o-btn o-btn--sm" :to="`/inspection/${t.id}`">查看详情</router-link>
+            </td>
           </tr>
         </tbody>
       </table>
