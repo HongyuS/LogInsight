@@ -172,7 +172,7 @@ onBeforeUnmount(() => {
       <li v-for="(f, i) in pendingFiles" :key="f.name + f.size">
         <span class="o-mono">{{ f.name }}</span>
         <span class="o-mono o-text-3">{{ (f.size / 1024).toFixed(1) }} KB</span>
-        <button class="o-btn o-btn--text o-btn--sm danger" title="移除" @click="removePending(i)">×</button>
+        <button class="o-btn o-btn--sm o-btn--danger del-x" title="移除" @click="removePending(i)">×</button>
       </li>
     </ul>
   </div>
@@ -223,7 +223,7 @@ onBeforeUnmount(() => {
             <td class="o-mono o-text-3">{{ t.finishedAt ? fmtTime(t.finishedAt) : '—' }}</td>
             <td class="actions">
               <router-link class="o-btn o-btn--sm" :to="`/inspection/${t.id}`">查看详情</router-link>
-              <button class="o-btn o-btn--sm o-btn--text danger" title="删除任务" @click="removeTask(t)">×</button>
+              <button class="o-btn o-btn--sm o-btn--danger del-x" title="删除任务" @click="removeTask(t)">×</button>
             </td>
           </tr>
         </tbody>
@@ -281,10 +281,19 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.danger {
-  color: var(--danger);
+.del-x {
+  font-size: 15px;
+  font-weight: 600;
 }
 .actions {
   white-space: nowrap;
+}
+/* 操作列两个按钮统一高度, 宽度按内容自适应 */
+.actions .o-btn {
+  height: 24px;
+  padding: 0 10px;
+}
+.actions .o-btn + .o-btn {
+  margin-left: 6px;
 }
 </style>
