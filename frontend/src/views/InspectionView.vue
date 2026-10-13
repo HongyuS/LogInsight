@@ -1,8 +1,10 @@
 <script setup lang="ts">
 /* 智能巡检: 上传日志包发起巡检 (规则引擎优先 + LLM 总结) + 任务列表实时进度 */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { get, post, apiError } from '@/api/http'
+import { get, post, del, apiError } from '@/api/http'
 import { fmtTime } from '@/parser/types'
+import { useTeamsStore } from '@/stores/teams'
+import { useRbacStore } from '@/stores/rbac'
 
 interface InspectionTask {
   id: string
@@ -32,8 +34,33 @@ const loading = ref(false)
 const loadErr = ref('')
 const uploadTip = ref('')
 const uploading = ref(false)
-const fileInput = ref<HTMLInputElement>()
+const fileInput = ref<HTMLInputElement>()   // 多选: 一次选多个日志
 let pollTimer: number | undefined
+
+/* 待巡检文件暂存区: 「上传日志」加入, 「发起巡检」将暂存多文件合并为一个任务提交 */
+const MAX_FILES = 20
+const pendingFiles = ref<File[]>([])
+const pendingSize = computed(() => pendingFiles.value.reduce((s, f) => s + f.size, 0))
+function addFiles(e: Event) {
+  const input = e.target as HTMLInputElement
+  const picked = Array.from(input.files ?? [])
+  input.value = ''
+  for (const f of picked) {
+    if (pendingFiles.value.length >= MAX_FILES) break
+    if (pendingFiles.value.some((x) => x.name === f.name && x.size === f.size)) continue
+    pendingFiles.value.push(f)
+  }
+}
+function removePending(i: number) {
+  pendingFiles.value.splice(i, 1)
+}
+
+/* 巡检规则作用团队 (可选): 决定本次巡检生效的「通用 ∪ 本团队」规则集 */
+const teamsStore = useTeamsStore()
+const rbac = useRbacStore()
+const uploadTeamId = ref<number | null>(null)
+const myTeams = computed(() => teamsStore.teams.filter(
+  t => rbac.isPlatformAdmin || teamsStore.myRoleOf(t.id)))
 
 const hasActive = computed(() =>
   tasks.value.some((t) => t.status === 'pending' || t.status === 'running'),
@@ -64,34 +91,51 @@ function schedulePoll() {
   }
 }
 
-function pickFile() {
+function pickFiles() {
   fileInput.value?.click()
 }
 
-async function onFileChosen(e: Event) {
-  const input = e.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
+/* 发起巡检: 将暂存的多文件作为一个任务提交 (后端遍历解析, 合并成一次巡检) */
+async function startInspection() {
+  if (!pendingFiles.value.length || uploading.value) return
   uploading.value = true
   uploadTip.value = ''
+  loadErr.value = ''
   try {
     const fd = new FormData()
-    fd.append('file', file)
+    for (const f of pendingFiles.value) fd.append('files', f)
     fd.append('task_type', 'inspection')
-    fd.append('task_name', file.name.replace(/\.[^.]+$/, ''))
+    fd.append('task_name', pendingFiles.value.length === 1
+      ? pendingFiles.value[0].name.replace(/\.[^.]+$/, '')
+      : `${pendingFiles.value.length} 个日志巡检`)
+    if (uploadTeamId.value != null) fd.append('team_id', String(uploadTeamId.value))
     const data = await post<{ taskId: string; status: string }>('/tasks/upload', fd)
     uploadTip.value = `巡检任务已创建（${data.taskId.slice(0, 8)}…），正在排队执行`
+    pendingFiles.value = []
     await load(true)
   } catch (e) {
-    uploadTip.value = ''
     loadErr.value = apiError(e)
   } finally {
     uploading.value = false
   }
 }
 
-onMounted(() => load())
+/* 删除自己的任务 (× ): 已结束/进行中均可删, 进行中会同时请求 Worker 停止 */
+async function removeTask(t: InspectionTask) {
+  if (!window.confirm(`确认删除任务「${t.name || t.filename}」？删除后不可恢复`)) return
+  loadErr.value = ''
+  try {
+    await del(`/tasks/${t.id}`)
+    await load(true)
+  } catch (e) {
+    loadErr.value = apiError(e)
+  }
+}
+
+onMounted(() => {
+  load()
+  teamsStore.fetchTeams().catch(() => { /* 团队列表不可用时仅用通用规则 */ })
+})
 onBeforeUnmount(() => {
   if (pollTimer) clearTimeout(pollTimer)
 })
@@ -104,15 +148,34 @@ onBeforeUnmount(() => {
       <span class="o-mono o-text-3">规则引擎优先匹配，LLM 智能化总结（未配置时降级纯规则）</span>
     </div>
     <div class="o-operate-right">
-      <input ref="fileInput" type="file" accept=".zip,.tar,.gz,.tgz,.log,.txt,.json,.jsonl" hidden @change="onFileChosen" />
-      <button class="o-btn o-btn--primary" :disabled="uploading" @click="pickFile">
-        {{ uploading ? '上传中…' : '上传日志包发起巡检' }}
+      <select v-model="uploadTeamId" class="o-select" style="width: 190px" title="选择本次巡检生效的团队规则作用域（可选）">
+        <option :value="null">仅通用规则</option>
+        <option v-for="t in myTeams" :key="t.id" :value="t.id">{{ t.name }} 专属规则</option>
+      </select>
+      <input ref="fileInput" type="file" multiple accept=".zip,.tar,.gz,.tgz,.log,.txt,.json,.jsonl" hidden @change="addFiles" />
+      <button class="o-btn" @click="pickFiles">＋ 上传日志</button>
+      <button class="o-btn o-btn--primary" :disabled="uploading || !pendingFiles.length" @click="startInspection">
+        {{ uploading ? '提交中…' : `发起巡检${pendingFiles.length ? `（${pendingFiles.length}）` : ''}` }}
       </button>
     </div>
   </div>
 
   <div v-if="uploadTip" class="o-mono" style="color: var(--primary); margin-bottom: 12px">✓ {{ uploadTip }}</div>
   <div v-if="loadErr" class="o-mono" style="color: var(--danger); margin-bottom: 12px">⚠ {{ loadErr }}</div>
+
+  <div v-if="pendingFiles.length" class="o-card">
+    <div class="o-card__title">
+      待巡检日志
+      <span class="o-mono o-text-3">{{ pendingFiles.length }} 个文件 · 合计 {{ (pendingSize / 1024).toFixed(1) }} KB · 将合并为一个巡检任务</span>
+    </div>
+    <ul class="staged-list">
+      <li v-for="(f, i) in pendingFiles" :key="f.name + f.size">
+        <span class="o-mono">{{ f.name }}</span>
+        <span class="o-mono o-text-3">{{ (f.size / 1024).toFixed(1) }} KB</span>
+        <button class="o-btn o-btn--text o-btn--sm danger" title="移除" @click="removePending(i)">×</button>
+      </li>
+    </ul>
+  </div>
 
   <div class="o-card">
     <div class="o-card__title">
@@ -131,7 +194,7 @@ onBeforeUnmount(() => {
             <td colspan="8">
               <div class="o-empty" style="padding: 48px 0">
                 <div class="icon">🔍</div>
-                <div>暂无巡检任务 — 上传日志包发起第一次巡检</div>
+                <div>暂无巡检任务 — 点击「上传日志」选择一个或多个日志后「发起巡检」</div>
               </div>
             </td>
           </tr>
@@ -158,8 +221,9 @@ onBeforeUnmount(() => {
             <td class="o-mono">{{ t.eventCount || '—' }}</td>
             <td class="o-mono o-text-3">{{ fmtTime(t.createdAt) }}</td>
             <td class="o-mono o-text-3">{{ t.finishedAt ? fmtTime(t.finishedAt) : '—' }}</td>
-            <td>
+            <td class="actions">
               <router-link class="o-btn o-btn--sm" :to="`/inspection/${t.id}`">查看详情</router-link>
+              <button class="o-btn o-btn--sm o-btn--text danger" title="删除任务" @click="removeTask(t)">×</button>
             </td>
           </tr>
         </tbody>
@@ -195,5 +259,32 @@ onBeforeUnmount(() => {
 }
 .progress-bar.bad {
   background: var(--danger);
+}
+.staged-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.staged-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.staged-list li:last-child {
+  border-bottom: none;
+}
+.staged-list li > span:first-child {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.danger {
+  color: var(--danger);
+}
+.actions {
+  white-space: nowrap;
 }
 </style>

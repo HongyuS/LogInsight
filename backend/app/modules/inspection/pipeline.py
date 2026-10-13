@@ -53,10 +53,11 @@ class _Cancelled(Exception):
 async def _pipeline(db: AsyncSession, task: Task, bus: EventBus, is_cancelled) -> None:
     task_id = str(task.id)
 
-    # 1. 解压与解析
+    # 1. 解压与解析 (storage_path 可能是单文件或多文件的目录)
     await bus.publish(task_id, "progress", {"step": "extract", "percent": 5, "message": "解压巡检数据包"})
-    work_dir = Path(task.storage_path).parent / "extracted"
-    files = safe_extract(Path(task.storage_path), work_dir)
+    base = Path(task.storage_path)
+    work_dir = (base if base.is_dir() else base.parent) / "extracted"
+    files = safe_extract(base, work_dir)
     if not files:
         raise RuntimeError("巡检数据包为空")
 
@@ -90,7 +91,7 @@ async def _pipeline(db: AsyncSession, task: Task, bus: EventBus, is_cancelled) -
             "checker": r.name, "passed": r.passed, "severity": r.severity, "message": r.message})
 
     # 3. 规则引擎 (复用诊断规则: 对解析条目做正则/关键字匹配)
-    engine = await RuleEngine.load(db)
+    engine = await RuleEngine.load_for_task(db, task)
     findings = engine.match_entries(ctx.entries[:100000])
     for f in findings[:100]:
         await bus.publish(task_id, "finding", {

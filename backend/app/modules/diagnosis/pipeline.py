@@ -25,9 +25,28 @@ EXTRACT_LIMIT_BYTES = 2 * 1024 * 1024 * 1024  # 2GB 防 zip 炸弹
 
 
 def safe_extract(archive_path: Path, dest: Path) -> list[Path]:
-    """解压日志包 (zip/tar.gz), 防路径穿越与超大成员."""
+    """解压日志包 (zip/tar.gz), 防路径穿越与超大成员.
+
+    - 目录 (多日志任务): 收集目录内文件, 遇压缩包就地解压到 dest
+    - 压缩包: 解压其成员
+    - 普通文件: 直接返回分析
+    """
     dest.mkdir(parents=True, exist_ok=True)
     extracted: list[Path] = []
+    if archive_path.is_dir():
+        dest_resolved = str(dest.resolve())
+        for f in sorted(archive_path.rglob("*")):
+            if len(extracted) >= EXTRACT_LIMIT_FILES:
+                break
+            if not f.is_file() or f.is_symlink():
+                continue
+            if str(f.resolve()).startswith(dest_resolved):
+                continue  # 跳过解压临时目录自身, 防递归
+            if zipfile.is_zipfile(f) or tarfile.is_tarfile(f):
+                extracted.extend(safe_extract(f, dest / f.stem))
+            else:
+                extracted.append(f)
+        return extracted
     if zipfile.is_zipfile(archive_path):
         with zipfile.ZipFile(archive_path) as zf:
             total = 0
@@ -93,17 +112,18 @@ class _Cancelled(Exception):
 async def _pipeline(db: AsyncSession, task: Task, bus: EventBus, is_cancelled) -> None:
     task_id = str(task.id)
 
-    # 1. 解压
+    # 1. 解压 (storage_path 可能是单文件或多文件的目录)
     await bus.publish(task_id, "progress", {"step": "extract", "percent": 5, "message": "解压与安全校验"})
-    work_dir = Path(task.storage_path).parent / "extracted"
-    files = safe_extract(Path(task.storage_path), work_dir)
+    base = Path(task.storage_path)
+    work_dir = (base if base.is_dir() else base.parent) / "extracted"
+    files = safe_extract(base, work_dir)
     if not files:
         raise RuntimeError("日志包为空或格式不支持")
     if await is_cancelled():
         raise _Cancelled()
 
     # 2. 解析 (插件识别) + 3. 规则匹配: regex/keyword 逐文件
-    engine = await RuleEngine.load(db)  # 每任务加载最新启用规则, 天然热加载
+    engine = await RuleEngine.load_for_task(db, task)  # 按任务作用域团队加载(通用∪本团队), 天然热加载
     all_findings: list[Finding] = []
     all_metrics: list[dict] = []
     file_stats: dict = {}

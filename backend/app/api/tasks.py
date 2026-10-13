@@ -3,12 +3,12 @@
 上传类型: diagnosis (通用诊断) / analyze (witty 解析任务, 指定解析器+资产库) /
 inspection (智能巡检); analyze 走团队级 RBAC (task:create).
 """
-import os
+import shutil
 import uuid
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import delete as sa_delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +18,7 @@ from app.api.schemas import (PrecheckRequest, PrecheckResponse, TaskInfo, TextUp
 from app.core.audit import log_audit
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.deps import get_current_user, get_redis
+from app.core.deps import ensure_team_perm, get_current_user, get_redis
 from app.models.asset import AssetLibrary
 from app.models.task import Task, TaskStatus, TaskType
 from app.models.user import User
@@ -32,11 +32,10 @@ ALLOWED_SUFFIXES = {".zip", ".tar", ".gz", ".tgz", ".log", ".txt",
                     ".json", ".jsonl"}  # witty: redfish/windows 为 JSON 导出
 
 
-async def _save_upload(file: UploadFile, task_id: uuid.UUID, limit: int) -> tuple[Path, int]:
-    """流式落盘 (防超大), 返回 (storage_path, size); 超限自动清理."""
-    upload_dir = Path(settings.DATA_DIR) / "uploads" / str(task_id)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    storage_path = upload_dir / (file.filename or "upload.bin")
+async def _save_upload(file: UploadFile, dest_dir: Path, limit: int) -> tuple[Path, int]:
+    """流式落盘单个文件 (防超大), 返回 (storage_path, size); 超限自动清理."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    storage_path = dest_dir / Path(file.filename or "upload.bin").name
     size = 0
     with open(storage_path, "wb") as f:
         while chunk := await file.read(1024 * 1024):
@@ -114,19 +113,32 @@ async def upload_text(
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload(
-    file: UploadFile,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
     redis: Annotated[object, Depends(get_redis)],
+    file: Annotated[UploadFile | None, File()] = None,          # 单文件 (兼容既有向导/诊断)
+    files: Annotated[list[UploadFile] | None, File()] = None,   # 多文件 (巡检: 合并为一个任务)
     server_type: Annotated[str, Form()] = "",
     task_type: Annotated[str, Form()] = "diagnosis",   # diagnosis / analyze / inspection
     parser_type: Annotated[str, Form()] = "",
     task_name: Annotated[str, Form()] = "",
     asset_id: Annotated[int | None, Form()] = None,
+    team_id: Annotated[int | None, Form()] = None,
 ):
-    """上传日志包: 保存文件 → 创建任务 → 入队 → 立即返回 task_id (分析异步进行)."""
+    """上传日志: 保存文件 → 创建任务 → 入队 → 立即返回 task_id (分析异步进行).
+
+    支持一次上传多个文件合并为一个任务 (巡检常用); analyze 仅支持单文件.
+    """
     if task_type not in ("diagnosis", "analyze", "inspection"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"不支持的任务类型: {task_type}")
+
+    uploads = list(files or [])
+    if file is not None:
+        uploads.insert(0, file)
+    if not uploads:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "未选择上传文件")
+    if task_type == "analyze" and len(uploads) != 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "解析任务仅支持单个文件")
 
     # 按用户限流
     rate_key = f"rate:upload:{user.id}"
@@ -136,9 +148,10 @@ async def upload(
     if count > settings.UPLOAD_RATE_LIMIT_PER_MIN:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "上传过于频繁, 请稍后再试")
 
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix and suffix not in ALLOWED_SUFFIXES and not (file.filename or "").endswith(".tar.gz"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"不支持的文件类型: {suffix}")
+    for uf in uploads:
+        suffix = Path(uf.filename or "").suffix.lower()
+        if suffix and suffix not in ALLOWED_SUFFIXES and not (uf.filename or "").endswith(".tar.gz"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"不支持的文件类型: {suffix}")
 
     asset = None
     if task_type == "analyze":
@@ -146,25 +159,49 @@ async def upload(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "解析任务必须指定资产库")
         _, asset = await _check_analyze_target(db, user, parser_type, asset_id)
 
+    # 巡检/诊断任务可选指定团队作用域 (决定生效的团队规则集); 需具备该团队 task:create
+    if team_id is not None and asset is None:
+        await ensure_team_perm(db, user, team_id, "task:create")
+
+    params: dict = {"server_type": server_type}
+    if team_id is not None and asset is None:
+        params["team_id"] = team_id  # 规则作用域团队 (无资产库时记录于任务参数)
+
     task_id = uuid.uuid4()
-    storage_path, size = await _save_upload(file, task_id, settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024)
+    upload_dir = Path(settings.DATA_DIR) / "uploads" / str(task_id)
+    budget = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    total = 0
+    names: list[str] = []
+    for uf in uploads:
+        _, size = await _save_upload(uf, upload_dir, budget - total)
+        total += size
+        names.append(Path(uf.filename or "upload.bin").name)
+
+    if len(names) > 1:
+        # 多文件: storage_path 指向目录, 由流水线遍历解析, 合并为一个任务
+        storage_path = str(upload_dir)
+        params["files"] = names
+        display_name = f"{len(names)} 个日志文件"
+    else:
+        storage_path = str(upload_dir / names[0])
+        display_name = names[0]
 
     task = Task(
         id=task_id, type=TaskType(task_type), status=TaskStatus.pending,
-        user_id=user.id, filename=file.filename or "upload.bin",
-        storage_path=str(storage_path), params={"server_type": server_type},
+        user_id=user.id, filename=display_name,
+        storage_path=storage_path, params=params,
         name=task_name, parser_type=parser_type,
-        asset_id=(asset.id if asset else None), log_size=size,
+        asset_id=(asset.id if asset else None), log_size=total,
     )
     db.add(task)
     if asset is not None:
         log_audit(db, user, "创建解析任务",
-                  f"{asset.name} / {task_name or file.filename}", team_id=asset.team_id)
+                  f"{asset.name} / {task_name or display_name}", team_id=asset.team_id)
     await db.commit()
 
     queue = TaskQueue(redis)
     await queue.enqueue(str(task_id), task_type,
-                        {"storage_path": str(storage_path), "server_type": server_type})
+                        {"storage_path": storage_path, "server_type": server_type})
     return UploadResponse(task_id=task_id, status=task.status)
 
 
@@ -225,27 +262,38 @@ async def delete_task(
     task_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
+    redis: Annotated[object, Depends(get_redis)],
 ):
-    """删除任务 (task:delete; 事件随任务 CASCADE, 上传文件一并清理)."""
+    """删除任务 (创建者/管理员可删; 关联报告/事件/指标与上传文件一并清理)."""
     task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one_or_none()
     if task is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "任务不存在")
     await _ensure_task_perm(db, user, task, "task:delete")
     team_id = await _team_id_of_task(db, task)
     log_audit(db, user, "删除解析任务", task.name or task.filename, team_id=team_id)
-    # 先删关联数据 (Report/ParsedEventRecord, ORM 层未配置级联)
+    # 排队/运行中: 写入取消标记, 让 Worker 尽快停止 (随后任务行即被删除)
+    if task.status in (TaskStatus.pending, TaskStatus.running):
+        await redis.set(f"cancel:{task_id}", "1", ex=3600)
+    storage_path = task.storage_path  # 提交后 ORM 对象失效, 提前捕获
+    # 先删关联数据 (ORM 层未配置级联)
     from app.models.analyze import ParsedEventRecord
+    from app.models.metric import MetricPoint
     from app.models.task import Report
     await db.execute(sa_delete(Report).where(Report.task_id == task_id))
     await db.execute(sa_delete(ParsedEventRecord).where(ParsedEventRecord.task_id == task_id))
+    await db.execute(sa_delete(MetricPoint).where(MetricPoint.task_id == str(task_id)))
     await db.delete(task)
     await db.commit()
-    if task.storage_path:
-        Path(task.storage_path).unlink(missing_ok=True)
-        try:
-            Path(task.storage_path).parent.rmdir()  # 空目录才移除
-        except OSError:
-            pass
+    if storage_path:
+        p = Path(storage_path)
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)  # 多日志任务: 清理整个目录
+        else:
+            p.unlink(missing_ok=True)
+            try:
+                p.parent.rmdir()  # 空目录才移除
+            except OSError:
+                pass
     return {"detail": "任务已删除"}
 
 
