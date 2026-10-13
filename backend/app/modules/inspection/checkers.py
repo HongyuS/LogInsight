@@ -29,6 +29,7 @@ class Checker:
     """检查项基类: 子类实现 check()."""
     name: str = "base"
     description: str = ""
+    levels: tuple[str, ...] = ()     # 关注的日志级别, 用于把规则命中归因到本检查项
 
     async def check(self, ctx: InspectionContext) -> CheckResult:
         raise NotImplementedError
@@ -44,6 +45,7 @@ class ErrorLogChecker(Checker):
     """示例检查项: 错误日志条目检查."""
     name = "error_log"
     description = "检查日志中的 ERROR/CRITICAL 条目"
+    levels = ("error", "critical")
 
     async def check(self, ctx: InspectionContext) -> CheckResult:
         errors = [e for e in ctx.entries if e.level in ("error", "critical")]
@@ -63,6 +65,7 @@ class WarnLogChecker(Checker):
     """示例检查项: 告警日志条目检查."""
     name = "warn_log"
     description = "检查日志中的 WARN 条目"
+    levels = ("warn",)
 
     async def check(self, ctx: InspectionContext) -> CheckResult:
         warns = [e for e in ctx.entries if e.level == "warn"]

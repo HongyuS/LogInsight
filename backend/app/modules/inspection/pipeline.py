@@ -96,6 +96,18 @@ async def _pipeline(db: AsyncSession, task: Task, bus: EventBus, is_cancelled) -
         await bus.publish(task_id, "finding", {
             "rule_name": f.rule_name, "severity": f.severity, "text": f.raw[:300]})
 
+    # 3b. 规则命中归因: 按命中行的日志级别关联到对应检查项, 供详情页"点开查看规则明细"
+    level_owner: dict[str, str] = {}
+    for checker in CHECKERS:
+        for lv in checker.levels:
+            level_owner.setdefault(lv, checker.name)
+    checker_desc = {c.name: c.description for c in CHECKERS}
+    rule_details = [{
+        "rule_id": f.rule_id, "rule_name": f.rule_name, "severity": f.severity,
+        "level": f.level, "line_no": f.line_no, "matched_text": f.matched_text,
+        "raw": f.raw[:300], "checker": level_owner.get(f.level, ""),
+    } for f in findings[:200]]
+
     # 4. 指标入库 (checker 产出的计数指标缺时间戳, 统一补齐为当前时间)
     now = datetime.now(timezone.utc)
     all_metrics = ctx.metrics + [m for r in results for m in r.metrics]
@@ -134,8 +146,10 @@ async def _pipeline(db: AsyncSession, task: Task, bus: EventBus, is_cancelled) -
     # 6. 报告
     db.add(Report(
         task_id=task.id, health_score=score, summary=summary,
-        findings=[{"checker": r.name, "passed": r.passed, "severity": r.severity, "message": r.message}
+        findings=[{"checker": r.name, "passed": r.passed, "severity": r.severity,
+                   "message": r.message, "description": checker_desc.get(r.name, "")}
                   for r in results],
-        content={"rule_hits": len(findings), "metric_count": len(all_metrics)},
+        content={"rule_hits": len(findings), "metric_count": len(all_metrics),
+                 "rule_details": rule_details},
     ))
     task.progress = 95

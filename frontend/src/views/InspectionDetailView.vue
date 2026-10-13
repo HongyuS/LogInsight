@@ -24,6 +24,18 @@ interface InspectionFinding {
   passed: boolean
   severity: string
   message: string
+  description?: string
+}
+
+interface InspectionRuleDetail {
+  ruleId: number
+  ruleName: string
+  severity: string
+  level: string
+  lineNo: number
+  matchedText: string
+  raw: string
+  checker: string
 }
 
 interface InspectionReport {
@@ -31,7 +43,7 @@ interface InspectionReport {
   healthScore: number | null
   summary: string
   findings: InspectionFinding[]
-  content: { ruleHits?: number; metricCount?: number }
+  content: { ruleHits?: number; metricCount?: number; ruleDetails?: InspectionRuleDetail[] }
   llm: boolean
   createdAt?: string | null
 }
@@ -119,6 +131,15 @@ const scoreCls = computed(() => {
   return s >= 90 ? 'ok' : s >= 70 ? 'warn' : 'bad'
 })
 
+/* 检查项展开: 查看详细结论与关联的规则命中明细 */
+const expanded = ref<Record<string, boolean>>({})
+function toggleRow(checker: string) {
+  expanded.value[checker] = !expanded.value[checker]
+}
+function rulesOf(checker: string): InspectionRuleDetail[] {
+  return (report.value?.content?.ruleDetails ?? []).filter((r) => r.checker === checker)
+}
+
 onMounted(async () => {
   await loadTask()
   if (!task.value) return
@@ -201,31 +222,78 @@ onBeforeUnmount(stopPoll)
       <div class="o-table-wrap">
         <table class="o-table">
           <thead>
-            <tr><th>检查项</th><th style="width: 110px">结果</th><th style="width: 90px">级别</th><th>说明</th></tr>
+            <tr>
+              <th style="width: 34px"></th>
+              <th>检查项</th>
+              <th style="width: 110px">结果</th>
+              <th style="width: 90px">级别</th>
+              <th>说明</th>
+            </tr>
           </thead>
           <tbody>
             <tr v-if="!findings.length">
-              <td colspan="4">
+              <td colspan="5">
                 <div class="o-empty" style="padding: 40px 0">
                   <div class="icon">📋</div>
                   <div>{{ reportPending || running ? '巡检结果生成中…' : '暂无检查项结果' }}</div>
                 </div>
               </td>
             </tr>
-            <tr v-for="f in findings" :key="f.checker">
-              <td class="o-mono"><b>{{ f.checker }}</b></td>
-              <td>
-                <span class="o-badge" :class="f.passed ? 'o-badge--success' : 'o-badge--danger'">
-                  {{ f.passed ? '通过' : '未通过' }}
-                </span>
-              </td>
-              <td>
-                <span class="o-badge" :class="(SEV_BADGE[f.severity] || SEV_BADGE.info).cls">
-                  {{ (SEV_BADGE[f.severity] || SEV_BADGE.info).label }}
-                </span>
-              </td>
-              <td>{{ f.message }}</td>
-            </tr>
+            <template v-for="f in findings" :key="f.checker">
+              <tr class="row-clickable" @click="toggleRow(f.checker)">
+                <td><span class="caret" :class="{ open: expanded[f.checker] }">▸</span></td>
+                <td class="o-mono"><b>{{ f.checker }}</b></td>
+                <td>
+                  <span class="o-badge" :class="f.passed ? 'o-badge--success' : 'o-badge--danger'">
+                    {{ f.passed ? '通过' : '未通过' }}
+                  </span>
+                </td>
+                <td>
+                  <span class="o-badge" :class="(SEV_BADGE[f.severity] || SEV_BADGE.info).cls">
+                    {{ (SEV_BADGE[f.severity] || SEV_BADGE.info).label }}
+                  </span>
+                </td>
+                <td>{{ f.message }}</td>
+              </tr>
+              <tr v-if="expanded[f.checker]" class="detail-row">
+                <td colspan="5">
+                  <div class="find-detail">
+                    <div v-if="f.description" class="fd-line">
+                      <span class="fd-k">检查项说明</span>{{ f.description }}
+                    </div>
+                    <div class="fd-line">
+                      <span class="fd-k">详细结论</span>{{ f.message || '（无）' }}
+                    </div>
+                    <div class="fd-rules">
+                      <div class="fd-k">关联规则命中（{{ rulesOf(f.checker).length }}）</div>
+                      <table v-if="rulesOf(f.checker).length" class="o-table fd-rules-table">
+                        <thead>
+                          <tr>
+                            <th style="width: 200px">规则名</th>
+                            <th style="width: 80px">级别</th>
+                            <th style="width: 70px">行号</th>
+                            <th>命中内容</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="r in rulesOf(f.checker)" :key="`${r.ruleId}-${r.lineNo}`">
+                            <td class="o-mono">{{ r.ruleName }}</td>
+                            <td>
+                              <span class="o-badge" :class="(SEV_BADGE[r.severity] || SEV_BADGE.info).cls">
+                                {{ (SEV_BADGE[r.severity] || SEV_BADGE.info).label }}
+                              </span>
+                            </td>
+                            <td class="o-mono o-text-3">{{ r.lineNo || '—' }}</td>
+                            <td><div class="o-mono fd-raw">{{ r.matchedText || r.raw }}</div></td>
+                          </tr>
+                        </tbody>
+                      </table>
+                      <div v-else class="o-text-3 fd-none">该项未关联到规则命中</div>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
@@ -287,5 +355,61 @@ onBeforeUnmount(stopPoll)
 }
 @keyframes rot {
   to { transform: rotate(360deg); }
+}
+.row-clickable {
+  cursor: pointer;
+}
+.row-clickable:hover {
+  background: var(--primary-soft, #f2f6ff);
+}
+.caret {
+  display: inline-block;
+  color: var(--text-3);
+  transition: transform 0.15s;
+  font-size: 12px;
+}
+.caret.open {
+  transform: rotate(90deg);
+}
+.detail-row > td {
+  background: #fbfcfe;
+  padding: 0 !important;
+}
+.find-detail {
+  padding: 14px 18px 16px;
+  border-left: 3px solid var(--primary);
+}
+.fd-line {
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text-2);
+  margin-bottom: 6px;
+}
+.fd-k {
+  display: inline-block;
+  min-width: 76px;
+  margin-right: 8px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+.fd-rules {
+  margin-top: 10px;
+}
+.fd-rules-table th {
+  font-size: 12px;
+  color: var(--text-3);
+  font-weight: 500;
+}
+.fd-rules-table td {
+  font-size: 12.5px;
+}
+.fd-raw {
+  font-size: 12px;
+  color: var(--text-2);
+  word-break: break-all;
+  line-height: 1.6;
+}
+.fd-none {
+  font-size: 12.5px;
 }
 </style>

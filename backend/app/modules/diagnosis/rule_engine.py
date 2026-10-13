@@ -37,6 +37,7 @@ class Finding:
     line_no: int
     raw: str
     matched_text: str = ""
+    level: str = ""          # 命中行的日志级别 (regex/keyword 规则填充, 供巡检检查项归因)
 
 
 @dataclass
@@ -131,11 +132,11 @@ class RuleEngine:
                     m = pattern.search(entry.raw) if pattern else None
                     if m:
                         findings.append(Finding(rule.id, rule.name, rule.severity.value,
-                                                line_no, entry.raw[:500], m.group(0)[:200]))
+                                                line_no, entry.raw[:500], m.group(0)[:200], entry.level))
                 elif rule.match_type == MatchType.keyword:
                     if rule.pattern and rule.pattern in entry.raw:
                         findings.append(Finding(rule.id, rule.name, rule.severity.value,
-                                                line_no, entry.raw[:500], rule.pattern))
+                                                line_no, entry.raw[:500], rule.pattern, entry.level))
         return findings
 
     def match_metrics(self, metrics: list[dict]) -> list[Finding]:
