@@ -225,6 +225,7 @@ class ReportInfo(BaseModel):
     summary: str
     sections: list[dict] = Field(default_factory=list)
     findings: list[dict] = Field(default_factory=list)
+    content: dict = Field(default_factory=dict)   # 巡检等: rule_hits / metric_count 等附加上下文
     llm: bool = False
     created_at: datetime | None = None
 

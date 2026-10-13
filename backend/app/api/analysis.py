@@ -165,8 +165,8 @@ async def task_report(
     return ReportInfo(
         task_id=report.task_id, health_score=report.health_score,
         summary=report.summary, sections=content.get("sections") or [],
-        findings=report.findings or [], llm=bool(content.get("llm")),
-        created_at=report.created_at)
+        findings=report.findings or [], content=content,
+        llm=bool(content.get("llm")), created_at=report.created_at)
 
 
 # ---------- 按需 LLM ----------
