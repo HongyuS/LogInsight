@@ -97,7 +97,15 @@ async def main() -> None:
 
     async def consume_loop():
         while not shutdown.is_set():
-            messages = await queue.consume(settings.WORKER_CONSUMER_NAME, count=1, block_ms=2000)
+            try:
+                messages = await queue.consume(settings.WORKER_CONSUMER_NAME, count=1, block_ms=2000)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # 单次 Redis 抖动不应终止消费循环 (否则任务会一直排队)
+                logger.exception("消费队列异常, 2s 后重试")
+                await asyncio.sleep(2)
+                continue
             for msg_id, task_id, task_type, payload in messages:
                 async def run(m_id=msg_id, t_id=task_id, t_type=task_type, p=payload):
                     async with semaphore:
