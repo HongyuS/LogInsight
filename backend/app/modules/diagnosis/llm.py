@@ -54,3 +54,33 @@ def rule_only_summary(findings: list[dict]) -> str:
     for f in findings[:20]:
         lines.append(f"[{f['severity']}] {f['rule_name']}: {f.get('matched_text', '')[:120]}")
     return "\n".join(lines)
+
+
+async def stream_rule_suggestions(context: str) -> AsyncIterator[str]:
+    """将现有规则 + 日志未覆盖的错误模式送入 LLM, 流式产出规则完善度评估与建议.
+
+    输出末段约定附带一个 ```json 代码块, 内含建议规则项数组, 供调用方解析为结构化 items.
+    """
+    if not llm_enabled():
+        yield "(LLM 未配置, 降级为启发式规则推荐)"
+        return
+
+    client = get_client()
+    response = await client.chat.completions.create(
+        model=settings.LLM_MODEL,
+        messages=[
+            {"role": "system", "content": (
+                "你是日志巡检规则专家。根据现有巡检规则与日志中尚未被规则覆盖的错误模式，"
+                "评估当前规则的完善程度，并给出建议新增的规则项。"
+                "先输出简洁的中文评估结论（覆盖度、缺口、风险），"
+                "然后在末尾给出一个 ```json 代码块，内容为建议规则项数组，"
+                "每项字段：name(规则名) / description(说明) / match_type(regex 或 keyword) / "
+                "pattern(匹配模式) / severity(info/warn/error/critical) / reason(建议理由)。"
+                "不要编造日志中不存在的模式。")},
+            {"role": "user", "content": context[:32000]},
+        ],
+        stream=True,
+    )
+    async for chunk in response:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content

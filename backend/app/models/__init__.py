@@ -6,6 +6,7 @@ from app.models.team import Team, TeamMember, TeamNotice
 from app.models.asset import AssetLibrary
 from app.models.audit import AuditLog
 from app.models.analyze import ParsedEventRecord
+from app.models.rule_suggestion import RuleSuggestion
 
 __all__ = [
     "User", "Role", "Permission",
@@ -13,5 +14,5 @@ __all__ = [
     "Rule", "MatchType", "Severity", "RuleAuditLog",
     "MetricPoint", "UserPreference",
     "Team", "TeamMember", "TeamNotice",
-    "AssetLibrary", "AuditLog", "ParsedEventRecord",
+    "AssetLibrary", "AuditLog", "ParsedEventRecord", "RuleSuggestion",
 ]

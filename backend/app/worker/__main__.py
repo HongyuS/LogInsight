@@ -18,6 +18,7 @@ from app.modules.analyze.llm_report import run_llm_report
 from app.modules.analyze.pipeline import run_analyze
 from app.modules.diagnosis.pipeline import run_diagnosis
 from app.modules.inspection.pipeline import run_inspection
+from app.modules.inspection.rule_suggest import run_rule_suggest
 from app.queue.task_queue import TaskQueue
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -60,6 +61,10 @@ async def handle_message(queue: TaskQueue, bus: EventBus, redis: Redis, msg_id: 
             # 按需 LLM 报告: 独立签名, run_id 取自消息 payload
             run_id = str(payload.get("run_id") or uuid.uuid4())
             await run_llm_report(uuid.UUID(task_id), run_id, bus, cancelled)
+        elif task_type == "rule_suggest":
+            # 智能巡检规则推荐: 独立签名, run_id 取自消息 payload
+            run_id = str(payload.get("run_id") or uuid.uuid4())
+            await run_rule_suggest(uuid.UUID(task_id), run_id, bus, cancelled)
         else:
             pipeline = PIPELINES.get(task_type)
             if pipeline is None:

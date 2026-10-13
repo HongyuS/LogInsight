@@ -219,6 +219,18 @@ class LlmStartResponse(BaseModel):
     run_id: str
 
 
+class RuleSuggestStartResponse(BaseModel):
+    run_id: str
+
+
+class RuleSuggestionInfo(BaseModel):
+    task_id: UUID
+    assessment: str
+    items: list[dict] = Field(default_factory=list)   # 建议规则项 (可编辑)
+    model: str = "heuristic"                          # 来源: heuristic 或 LLM 模型名
+    updated_at: datetime | None = None
+
+
 class ReportInfo(BaseModel):
     task_id: UUID
     health_score: int | None = None
