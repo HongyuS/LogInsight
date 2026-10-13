@@ -297,6 +297,7 @@ class RuleInfo(RuleCreate):
     id: int
     version: int
     is_builtin: bool
+    team_id: int | None = None   # NULL=平台通用, 非空=团队专属
     created_by: int | None = None
     created_at: datetime
     updated_at: datetime

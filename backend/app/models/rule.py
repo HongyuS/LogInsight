@@ -49,6 +49,10 @@ class Rule(Base):
     version: Mapped[int] = mapped_column(Integer, default=1, index=True)
 
     is_builtin: Mapped[bool] = mapped_column(Boolean, default=False)    # 预置规则
+    # 归属团队: NULL=平台通用规则(全体可见), 非空=团队专属规则
+    # 任务执行时取「通用 ∪ 本团队」, 同名时团队规则覆盖通用规则
+    team_id: Mapped[int | None] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=True, index=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

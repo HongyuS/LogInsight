@@ -5,13 +5,13 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import RuleCreate, RuleInfo, RuleUpdate
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.deps import get_current_user, get_redis
+from app.core.deps import get_current_user, get_redis, load_team_role
 from app.models.rule import MatchType, Rule, RuleAuditLog
 from app.models.user import User
 
@@ -116,9 +116,15 @@ async def read_rule_script(
 async def list_rules(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
+    team_id: int | None = None,
     enabled_only: bool = False,
 ):
+    """列出规则: 不传 team_id 只返回平台通用规则; 传 team_id 返回「通用 ∪ 本团队」."""
     query = select(Rule).order_by(Rule.priority, Rule.id)
+    if team_id is None:
+        query = query.where(Rule.team_id.is_(None))
+    else:
+        query = query.where(or_(Rule.team_id.is_(None), Rule.team_id == team_id))
     if enabled_only:
         query = query.where(Rule.enabled.is_(True))
     return (await db.execute(query)).scalars().all()
@@ -135,7 +141,7 @@ async def create_rule(
     validate_rule(body)
     _normalize_rule(body)
     max_version = (await db.execute(select(func.max(Rule.version)))).scalar() or 0
-    rule = Rule(**body.model_dump(), version=max_version + 1, created_by=user.id)
+    rule = Rule(**body.model_dump(), version=max_version + 1, created_by=user.id, team_id=None)
     db.add(rule)
     await db.flush()  # 先落库生成 rule.id, 审计日志外键依赖它
     db.add(RuleAuditLog(rule_id=rule.id, rule_name=rule.name, action="create",
@@ -159,6 +165,8 @@ async def update_rule(
     rule = (await db.execute(select(Rule).where(Rule.id == rule_id))).scalar_one_or_none()
     if rule is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "规则不存在")
+    if rule.team_id is not None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "团队专属规则请通过团队规则接口管理")
     # 版本化: 更新即产生新版本号, Worker 感知到版本变化后热加载
     max_version = (await db.execute(select(func.max(Rule.version)))).scalar() or 0
     old = {c.name: getattr(rule, c.name) for c in rule.__table__.columns}
@@ -183,8 +191,113 @@ async def delete_rule(
     rule = (await db.execute(select(Rule).where(Rule.id == rule_id))).scalar_one_or_none()
     if rule is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "规则不存在")
+    if rule.team_id is not None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "团队专属规则请通过团队规则接口管理")
     if rule.is_builtin:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "内置规则不可删除, 可停用")
+    db.add(RuleAuditLog(rule_id=rule.id, rule_name=rule.name, action="delete",
+                        operator_id=user.id, detail={}))
+    await db.delete(rule)
+    await db.commit()
+    return {"detail": "已删除"}
+
+
+# ---------- 团队级规则管理 (团队 owner/team_admin 定制本团队巡检规则) ----------
+
+team_router = APIRouter(prefix="/teams/{team_id}/rules", tags=["rules"])
+
+
+async def _ensure_team_rule_admin(db: AsyncSession, user: User, team_id: int) -> None:
+    """团队规则写操作权限: 团队 owner/team_admin (平台管理员经 load_team_role 直通 owner)."""
+    team, role = await load_team_role(db, user, team_id)
+    if team is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "团队不存在")
+    if role not in ("owner", "team_admin"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "需要团队管理员权限")
+
+
+def _reject_team_script(body: RuleCreate) -> None:
+    """团队规则暂不开放脚本类型 (脚本等价于在服务器执行代码, 安全面收敛到平台维护)."""
+    if body.match_type == MatchType.script:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "团队规则暂不支持脚本类型, 请使用关键字/正则/阈值")
+
+
+@team_router.get("", response_model=list[RuleInfo])
+async def list_team_rules(
+    team_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """团队规则视图: 平台通用规则(只读) + 本团队专属规则."""
+    query = (select(Rule)
+             .where(or_(Rule.team_id.is_(None), Rule.team_id == team_id))
+             .order_by(Rule.priority, Rule.id))
+    return (await db.execute(query)).scalars().all()
+
+
+@team_router.post("", response_model=RuleInfo, status_code=201)
+async def create_team_rule(
+    team_id: int,
+    body: RuleCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """新增团队专属规则 (owner/team_admin)."""
+    await _ensure_team_rule_admin(db, user, team_id)
+    _reject_team_script(body)
+    validate_rule(body)
+    _normalize_rule(body)
+    max_version = (await db.execute(select(func.max(Rule.version)))).scalar() or 0
+    rule = Rule(**body.model_dump(), version=max_version + 1, created_by=user.id, team_id=team_id)
+    db.add(rule)
+    await db.flush()
+    db.add(RuleAuditLog(rule_id=rule.id, rule_name=rule.name, action="create",
+                        operator_id=user.id, detail=body.model_dump()))
+    await db.commit()
+    await db.refresh(rule)
+    return rule
+
+
+@team_router.put("/{rule_id}", response_model=RuleInfo)
+async def update_team_rule(
+    team_id: int,
+    rule_id: int,
+    body: RuleUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """编辑团队专属规则 (owner/team_admin); 仅限本团队规则."""
+    await _ensure_team_rule_admin(db, user, team_id)
+    _reject_team_script(body)
+    validate_rule(body)
+    _normalize_rule(body)
+    rule = (await db.execute(select(Rule).where(Rule.id == rule_id))).scalar_one_or_none()
+    if rule is None or rule.team_id != team_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "团队规则不存在")
+    max_version = (await db.execute(select(func.max(Rule.version)))).scalar() or 0
+    old = {c.name: getattr(rule, c.name) for c in rule.__table__.columns}
+    for key, value in body.model_dump().items():
+        setattr(rule, key, value)
+    rule.version = max_version + 1
+    db.add(RuleAuditLog(rule_id=rule.id, rule_name=rule.name, action="update",
+                        operator_id=user.id, detail={"old": old, "new": body.model_dump()}))
+    await db.commit()
+    await db.refresh(rule)
+    return rule
+
+
+@team_router.delete("/{rule_id}")
+async def delete_team_rule(
+    team_id: int,
+    rule_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """删除团队专属规则 (owner/team_admin); 仅限本团队规则."""
+    await _ensure_team_rule_admin(db, user, team_id)
+    rule = (await db.execute(select(Rule).where(Rule.id == rule_id))).scalar_one_or_none()
+    if rule is None or rule.team_id != team_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "团队规则不存在")
     db.add(RuleAuditLog(rule_id=rule.id, rule_name=rule.name, action="delete",
                         operator_id=user.id, detail={}))
     await db.delete(rule)

@@ -1,12 +1,16 @@
 <script setup lang="ts">
-/* 规则管理: 巡检/诊断规则 CRUD, 版本化热加载, 平台级 rule:manage 权限控制 */
-import { computed, onMounted, reactive, ref } from 'vue'
+/* 规则管理: 平台通用规则 + 各团队专属规则 CRUD, 版本化热加载
+   - 通用规则(team_id=NULL): 平台 rule:manage 权限维护
+   - 团队规则(team_id=X): 团队 owner/team_admin 维护, 执行时同名覆盖通用规则 */
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { get, post, put, del, apiError } from '@/api/http'
 import { fmtTime } from '@/parser/types'
 import { useRbacStore } from '@/stores/rbac'
+import { useTeamsStore } from '@/stores/teams'
 
 const rbac = useRbacStore()
+const teamsStore = useTeamsStore()
 const canManage = computed(() => rbac.hasPerm('rule:manage'))
 const route = useRoute()
 const router = useRouter()
@@ -28,6 +32,7 @@ interface RuleRow {
   priority: number
   version: number
   isBuiltin: boolean
+  teamId: number | null
   createdAt: string
 }
 
@@ -49,19 +54,51 @@ const loading = ref(false)
 const loadErr = ref('')
 const scriptOptions = ref<{ path: string; doc: string }[]>([])
 
+/* ---------- 作用域: null=平台通用规则; 数字=某团队 ---------- */
+const scopeTeamId = ref<number | null>(null)
+const isTeamScope = computed(() => scopeTeamId.value != null)
+/* 可选团队: 平台管理员全部可见, 否则仅我所属团队 */
+const myTeams = computed(() => teamsStore.teams.filter(
+  t => rbac.isPlatformAdmin || teamsStore.myRoleOf(t.id)))
+/* 当前作用域是否具备团队规则写权限 (owner/team_admin 或平台管理员) */
+const canManageTeam = computed(() => isTeamScope.value &&
+  (rbac.isPlatformAdmin || ['owner', 'team_admin'].includes(teamsStore.myRoleOf(scopeTeamId.value!) ?? '')))
+const canCreate = computed(() => (isTeamScope.value ? canManageTeam.value : canManage.value))
+/* 团队作用域不开放脚本类型 */
+const MATCH_TYPES = computed(() => {
+  const all = Object.entries(MATCH_LABEL) as [RuleRow['matchType'], string][]
+  return isTeamScope.value ? all.filter(([k]) => k !== 'script') : all
+})
+
+function teamName(id: number | null): string {
+  return id == null ? '通用' : (teamsStore.teamById(id)?.name ?? `团队#${id}`)
+}
+/* 行可编辑: 通用规则仅在平台作用域可编辑; 团队规则需本团队管理权限 */
+function canEditRow(row: RuleRow): boolean {
+  if (row.teamId == null) return !isTeamScope.value && canManage.value
+  return canManageTeam.value && row.teamId === scopeTeamId.value
+}
+/* 当前作用域下的规则接口前缀 */
+function ruleBase(): string {
+  return isTeamScope.value ? `/teams/${scopeTeamId.value}/rules` : '/rules'
+}
+
 async function load() {
   loading.value = true
   loadErr.value = ''
   try {
-    rules.value = await get<RuleRow[]>('/rules')
+    const q = scopeTeamId.value != null ? `?team_id=${scopeTeamId.value}` : ''
+    rules.value = await get<RuleRow[]>(`/rules${q}`)
   } catch (e) {
     loadErr.value = apiError(e)
   } finally {
     loading.value = false
   }
 }
+watch(scopeTeamId, () => load())
 onMounted(() => {
   load()
+  teamsStore.fetchTeams().catch(() => { /* 团队列表不可用时仅展示通用规则 */ })
   if (canManage.value) {
     get<{ path: string; doc: string }[]>('/rules/scripts')
       .then(l => { scriptOptions.value = l })
@@ -118,6 +155,7 @@ function applyPrefill() {
   const q = route.query
   if (q.prefill !== '1' || !canManage.value) return
   const severity = String(q.severity ?? 'warn')
+  scopeTeamId.value = null   // 规则推荐接纳 → 落到平台通用规则
   saveErr.value = ''
   editingId.value = null
   Object.assign(form, emptyForm(), {
@@ -179,8 +217,8 @@ async function save() {
       body.pattern = form.pattern
       body.threshold = {}
     }
-    if (editingId.value) await put(`/rules/${editingId.value}`, body)
-    else await post('/rules', body)
+    if (editingId.value) await put(`${ruleBase()}/${editingId.value}`, body)
+    else await post(ruleBase(), body)
     showEdit.value = false
     await load()
   } catch (e) {
@@ -194,7 +232,7 @@ async function remove(row: RuleRow) {
   if (!window.confirm(`确认删除规则「${row.name}」？`)) return
   loadErr.value = ''
   try {
-    await del(`/rules/${row.id}`)
+    await del(`${ruleBase()}/${row.id}`)
     await load()
   } catch (e) {
     loadErr.value = apiError(e)
@@ -239,10 +277,16 @@ function editFromDetail() {
   <div class="o-operate-bar">
     <div class="o-operate-left">
       <h2>巡检 / 诊断规则</h2>
-      <span class="o-mono o-text-3">规则版本化存储，Worker 感知版本变化后热加载，无需重启</span>
+      <span class="o-mono o-text-3">
+        {{ isTeamScope ? '通用规则(只读) + 本团队专属规则；执行时团队规则同名覆盖通用' : '平台通用规则，全体团队共享，版本化热加载无需重启' }}
+      </span>
     </div>
     <div class="o-operate-right">
-      <button v-permission="'rule:manage'" class="o-btn o-btn--primary" @click="openEdit()">＋ 新增规则</button>
+      <select v-model="scopeTeamId" class="o-select" style="width: 200px">
+        <option :value="null">通用规则（平台）</option>
+        <option v-for="t in myTeams" :key="t.id" :value="t.id">{{ t.name }}</option>
+      </select>
+      <button v-if="canCreate" class="o-btn o-btn--primary" @click="openEdit()">＋ 新增规则</button>
     </div>
   </div>
 
@@ -253,19 +297,24 @@ function editFromDetail() {
       <table class="o-table">
         <thead>
           <tr>
-            <th>名称</th><th>匹配类型</th><th>匹配内容</th><th>级别</th>
+            <th>名称</th><th>归属</th><th>匹配类型</th><th>匹配内容</th><th>级别</th>
             <th>优先级</th><th>版本</th><th>状态</th><th>更新时间</th><th></th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!rules.length && !loading">
-            <td colspan="9"><div class="o-empty" style="padding: 48px 0">📭 暂无规则</div></td>
+            <td colspan="10"><div class="o-empty" style="padding: 48px 0">📭 暂无规则</div></td>
           </tr>
           <tr v-for="r in rules" :key="r.id">
             <td>
               <b>{{ r.name }}</b>
               <span v-if="r.isBuiltin" class="o-badge o-badge--brand" style="margin-left: 6px">内置</span>
               <div v-if="r.description" class="o-text-3 desc">{{ r.description }}</div>
+            </td>
+            <td>
+              <span class="o-badge" :class="r.teamId == null ? 'o-badge--outline' : 'o-badge--brand'">
+                {{ teamName(r.teamId) }}
+              </span>
             </td>
             <td><span class="o-badge" :class="MATCH_BADGE[r.matchType]">{{ MATCH_LABEL[r.matchType] }}</span></td>
             <td class="pattern-cell" title="点击查看完整规则信息" @click="openDetail(r)">
@@ -287,7 +336,7 @@ function editFromDetail() {
             </td>
             <td class="o-mono o-text-3">{{ fmtTime(r.createdAt) }}</td>
             <td class="actions">
-              <template v-if="canManage">
+              <template v-if="canEditRow(r)">
                 <button class="o-btn o-btn--text o-btn--sm" @click="openEdit(r)">编辑</button>
                 <button class="o-btn o-btn--text o-btn--sm danger" :disabled="r.isBuiltin" @click="remove(r)">删除</button>
               </template>
@@ -302,7 +351,12 @@ function editFromDetail() {
   <!-- 新增/编辑弹窗 -->
   <div v-if="showEdit" class="o-modal-mask" @click.self="showEdit = false">
     <div class="o-modal">
-      <div class="o-modal__title">{{ editingId ? '编辑规则' : '新增规则' }}</div>
+      <div class="o-modal__title">
+        {{ editingId ? '编辑规则' : '新增规则' }}
+        <span class="o-badge" :class="isTeamScope ? 'o-badge--brand' : 'o-badge--outline'" style="margin-left: 6px">
+          {{ isTeamScope ? teamName(scopeTeamId) : '平台通用' }}
+        </span>
+      </div>
       <div class="o-form-item">
         <label class="o-form-item__label required">名称</label>
         <input v-model="form.name" class="o-input" placeholder="规则名称，如：OOM 错误检测" />
@@ -315,7 +369,7 @@ function editFromDetail() {
         <label class="o-form-item__label required">匹配类型</label>
         <div class="match-chips">
           <button
-            v-for="(label, key) in MATCH_LABEL"
+            v-for="[key, label] in MATCH_TYPES"
             :key="key"
             class="match-chip"
             :class="{ active: form.match_type === key }"
@@ -469,7 +523,7 @@ function editFromDetail() {
       </template>
 
       <div class="o-modal__foot">
-        <button v-if="canManage" class="o-btn" @click="editFromDetail">编辑</button>
+        <button v-if="canEditRow(detailRule)" class="o-btn" @click="editFromDetail">编辑</button>
         <button class="o-btn o-btn--primary" @click="showDetail = false">关闭</button>
       </div>
     </div>

@@ -30,6 +30,9 @@ _GUARDS: list[tuple[str, str]] = [
     ("ALTER TABLE users ADD COLUMN IF NOT EXISTS title VARCHAR(64) DEFAULT ''", "users.title"),
     ("ALTER TABLE users ADD COLUMN IF NOT EXISTS dept VARCHAR(64) DEFAULT ''", "users.dept"),
     ("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_hue INTEGER DEFAULT 212", "users.avatar_hue"),
+    # rules 表: 归属团队 (NULL=平台通用规则, 非空=团队专属规则)
+    ("ALTER TABLE rules ADD COLUMN IF NOT EXISTS team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE", "rules.team_id"),
+    ("CREATE INDEX IF NOT EXISTS ix_rules_team_id ON rules (team_id)", "rules.team_id 索引"),
 ]
 
 

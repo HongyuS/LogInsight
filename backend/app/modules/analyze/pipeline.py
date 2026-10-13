@@ -107,7 +107,7 @@ async def _pipeline(db: AsyncSession, task: Task, bus: EventBus, is_cancelled) -
 
     # 4. 规则引擎匹配 (复用全局规则集, LogEntry 适配; 分块控内存)
     await bus.publish(task_id, "progress", {"step": "rules", "percent": 75, "message": "规则匹配中"})
-    engine = await RuleEngine.load(db)
+    engine = await RuleEngine.load_for_task(db, task)
     findings = []
     for start in range(0, len(events), RULE_CHUNK):
         if await is_cancelled():

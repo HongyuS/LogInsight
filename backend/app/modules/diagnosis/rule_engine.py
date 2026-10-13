@@ -13,10 +13,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.models.asset import AssetLibrary
 from app.models.rule import MatchType, Rule, Severity
 from app.modules.diagnosis.parsers import LogEntry, ParseResult
 
@@ -114,9 +115,46 @@ class RuleEngine:
             self._compiled.append((rule, pattern))
 
     @classmethod
-    async def load(cls, db: AsyncSession) -> "RuleEngine":
-        rules = (await db.execute(select(Rule).where(Rule.enabled.is_(True)))).scalars().all()
-        return cls(list(rules))
+    async def load(cls, db: AsyncSession, team_id: int | None = None) -> "RuleEngine":
+        return cls(await cls.load_rules(db, team_id))
+
+    @staticmethod
+    async def resolve_team_id(db: AsyncSession, task) -> int | None:
+        """任务作用域团队: 显式参数 team_id 优先, 否则沿资产库反查; 均无则 None(仅通用规则)."""
+        tid = (task.params or {}).get("team_id")
+        if tid is not None:
+            return int(tid)
+        if task.asset_id is None:
+            return None
+        return (await db.execute(
+            select(AssetLibrary.team_id).where(AssetLibrary.id == task.asset_id)
+        )).scalar_one_or_none()
+
+    @staticmethod
+    async def load_rules(db: AsyncSession, team_id: int | None = None) -> list[Rule]:
+        """加载启用规则: team_id=None 只取平台通用; 指定团队时取「通用 ∪ 本团队」.
+
+        同名冲突时团队规则覆盖通用规则 (团队可定制而不影响其他团队)。
+        """
+        conds = [Rule.enabled.is_(True)]
+        if team_id is None:
+            conds.append(Rule.team_id.is_(None))
+        else:
+            conds.append(or_(Rule.team_id.is_(None), Rule.team_id == team_id))
+        rules = list((await db.execute(select(Rule).where(*conds))).scalars().all())
+        if team_id is not None:
+            chosen: dict[str, Rule] = {}
+            for r in rules:
+                cur = chosen.get(r.name)
+                if cur is None or (cur.team_id is None and r.team_id == team_id):
+                    chosen[r.name] = r
+            rules = list(chosen.values())
+        return rules
+
+    @classmethod
+    async def load_for_task(cls, db: AsyncSession, task) -> "RuleEngine":
+        """按任务作用域团队加载启用规则 (通用 ∪ 本团队)."""
+        return cls(await cls.load_rules(db, await cls.resolve_team_id(db, task)))
 
     def script_rules(self) -> list[Rule]:
         """启用中的脚本规则, 按 priority, id 排序 (决定结果合并顺序)."""

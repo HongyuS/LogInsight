@@ -96,7 +96,7 @@ async def _generate(task_id: UUID, run_id: str, key: str, bus: EventBus, is_canc
             raise RuntimeError("任务无可用日志条目, 无法评估规则完善度")
 
         # 2. 现有规则覆盖情况
-        rules = (await db.execute(select(Rule).where(Rule.enabled.is_(True)))).scalars().all()
+        rules = await RuleEngine.load_rules(db, await RuleEngine.resolve_team_id(db, task))
         engine = RuleEngine(list(rules))
         findings = engine.match_entries(entries[:MAX_ENTRIES])
         covered_lines = {f.line_no for f in findings}
