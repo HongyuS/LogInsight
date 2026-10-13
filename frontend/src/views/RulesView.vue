@@ -1,12 +1,15 @@
 <script setup lang="ts">
 /* 规则管理: 巡检/诊断规则 CRUD, 版本化热加载, 平台级 rule:manage 权限控制 */
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { get, post, put, del, apiError } from '@/api/http'
 import { fmtTime } from '@/parser/types'
 import { useRbacStore } from '@/stores/rbac'
 
 const rbac = useRbacStore()
 const canManage = computed(() => rbac.hasPerm('rule:manage'))
+const route = useRoute()
+const router = useRouter()
 
 interface RuleRow {
   id: number
@@ -64,6 +67,7 @@ onMounted(() => {
       .then(l => { scriptOptions.value = l })
       .catch(() => { /* 脚本目录为空或不可用时保持空建议 */ })
   }
+  applyPrefill()
 })
 
 /* ---------- 编辑弹窗 ---------- */
@@ -107,6 +111,24 @@ function openEdit(row?: RuleRow) {
 
 function pickMatch(t: RuleRow['matchType']) {
   form.match_type = t
+}
+
+/* 从「智能巡检规则推荐」接纳跳转而来: 打开新增弹窗并预填推荐内容 */
+function applyPrefill() {
+  const q = route.query
+  if (q.prefill !== '1' || !canManage.value) return
+  const severity = String(q.severity ?? 'warn')
+  saveErr.value = ''
+  editingId.value = null
+  Object.assign(form, emptyForm(), {
+    name: typeof q.name === 'string' ? q.name : '',
+    description: typeof q.description === 'string' ? q.description : '',
+    match_type: (q.match_type === 'regex' ? 'regex' : 'keyword') as RuleRow['matchType'],
+    pattern: typeof q.pattern === 'string' ? q.pattern : '',
+    severity: (['info', 'warn', 'error', 'critical'].includes(severity) ? severity : 'warn') as RuleRow['severity'],
+  })
+  showEdit.value = true
+  router.replace({ path: '/rules' })   // 清除 query, 避免刷新重复弹窗
 }
 
 async function save() {

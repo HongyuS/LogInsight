@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /* 智能巡检详情: 单个巡检任务的执行结果展示 (健康评分 / 检查项结论 / 摘要 / 规则命中) */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
-import { get, apiError } from '@/api/http'
+import { useRoute, useRouter } from 'vue-router'
+import { get, post, apiError, TOKEN_KEY } from '@/api/http'
 import { fmtTime } from '@/parser/types'
 
 interface InspectionTask {
@@ -46,6 +46,25 @@ interface InspectionReport {
   content: { ruleHits?: number; metricCount?: number; ruleDetails?: InspectionRuleDetail[] }
   llm: boolean
   createdAt?: string | null
+}
+
+interface RuleSuggestionItem {
+  name: string
+  description: string
+  matchType: string
+  pattern: string
+  severity: string
+  reason: string
+  hitCount: number | null
+  sample: string
+}
+
+interface RuleSuggestionResult {
+  taskId: string
+  assessment: string
+  items: Record<string, any>[]
+  model: string
+  updatedAt?: string | null
 }
 
 const STATUS_BADGE: Record<InspectionTask['status'], { label: string; cls: string }> = {
@@ -140,13 +159,126 @@ function rulesOf(checker: string): InspectionRuleDetail[] {
   return (report.value?.content?.ruleDetails ?? []).filter((r) => r.checker === checker)
 }
 
+/* 智能巡检规则推荐: 按需 SSE 流式评估 + 建议项可编辑 + 接纳跳转新增规则 */
+const router = useRouter()
+const sugLoaded = ref(false)          // 是否已生成过推荐
+const sugStreaming = ref(false)
+const sugProgress = ref(0)
+const sugAssessment = ref('')
+const sugItems = ref<RuleSuggestionItem[]>([])
+const sugModel = ref('')
+const sugErr = ref('')
+let sugEs: EventSource | null = null
+
+function closeSug() {
+  sugEs?.close()
+  sugEs = null
+  sugStreaming.value = false
+}
+
+function normItem(raw: Record<string, any>): RuleSuggestionItem {
+  return {
+    name: raw.name ?? '',
+    description: raw.description ?? '',
+    matchType: raw.matchType ?? raw.match_type ?? 'keyword',
+    pattern: raw.pattern ?? '',
+    severity: raw.severity ?? 'warn',
+    reason: raw.reason ?? '',
+    hitCount: raw.hitCount ?? raw.hit_count ?? null,
+    sample: raw.sample ?? '',
+  }
+}
+
+async function loadSuggestion() {
+  try {
+    const r = await get<RuleSuggestionResult>(`/tasks/${taskId.value}/rule-suggestions`)
+    sugAssessment.value = r.assessment
+    sugItems.value = (r.items ?? []).map(normItem)
+    sugModel.value = r.model
+    sugLoaded.value = true
+  } catch {
+    sugLoaded.value = false   // 404: 尚未生成, 忽略
+  }
+}
+
+async function startSuggestion() {
+  sugErr.value = ''
+  sugAssessment.value = ''
+  sugItems.value = []
+  sugProgress.value = 0
+  try {
+    const { runId } = await post<{ runId: string }>(`/tasks/${taskId.value}/rule-suggestions`)
+    sugLoaded.value = true
+    sugStreaming.value = true
+    const token = localStorage.getItem(TOKEN_KEY) ?? ''
+    sugEs = new EventSource(
+      `/api/tasks/${taskId.value}/rule-suggestions/events?run_id=${encodeURIComponent(runId)}&token=${encodeURIComponent(token)}`)
+    sugEs.addEventListener('suggestion_token', (ev) => {
+      const d = JSON.parse((ev as MessageEvent).data)
+      sugAssessment.value += d.text ?? ''
+    })
+    sugEs.addEventListener('suggestion', (ev) => {
+      const d = JSON.parse((ev as MessageEvent).data)
+      if (typeof d.assessment === 'string') sugAssessment.value = d.assessment
+      sugItems.value = (d.items ?? []).map(normItem)
+    })
+    sugEs.addEventListener('progress', (ev) => {
+      const d = JSON.parse((ev as MessageEvent).data)
+      sugProgress.value = d.progress ?? 0
+    })
+    sugEs.addEventListener('done', (ev) => {
+      const d = JSON.parse((ev as MessageEvent).data)
+      if (d.status && d.status !== 'done') sugErr.value = `生成未完成(${d.status})`
+      closeSug()
+      sugProgress.value = 100
+    })
+    sugEs.addEventListener('error', (ev) => {
+      const me = ev as MessageEvent
+      if (me.data) {
+        try { sugErr.value = JSON.parse(me.data).message || '规则推荐生成失败' } catch { sugErr.value = '规则推荐生成失败' }
+      }
+      closeSug()
+    })
+    sugEs.onerror = () => {
+      if (sugStreaming.value && !sugErr.value) {
+        sugErr.value = 'SSE 连接中断，请重试'
+        closeSug()
+      }
+    }
+  } catch (e) {
+    sugErr.value = apiError(e)
+  }
+}
+
+function removeItem(i: number) {
+  sugItems.value.splice(i, 1)
+}
+
+/* 接纳某条建议 → 跳转规则管理页, 预填新增弹窗 */
+function acceptItem(item: RuleSuggestionItem) {
+  router.push({
+    path: '/rules',
+    query: {
+      prefill: '1', name: item.name, description: item.description || '',
+      match_type: item.matchType || 'keyword', pattern: item.pattern || '',
+      severity: item.severity || 'warn',
+    },
+  })
+}
+
 onMounted(async () => {
   await loadTask()
   if (!task.value) return
   if (running.value) schedulePoll()
-  else if (task.value.status === 'done') await loadReport()
+  else if (task.value.status === 'done') {
+    await loadReport()
+    await loadSuggestion()
+  }
 })
-onBeforeUnmount(stopPoll)
+onBeforeUnmount(() => {
+  stopPoll()
+  closeSug()
+})
 </script>
 
 <template>
@@ -298,6 +430,86 @@ onBeforeUnmount(stopPoll)
         </table>
       </div>
     </div>
+
+    <!-- 智能巡检规则推荐 -->
+    <div v-if="task.status === 'done'" class="o-card" style="margin-top: 16px">
+      <div class="o-card__title">
+        智能巡检规则推荐
+        <span class="o-mono o-text-3">
+          {{ sugModel ? (sugModel === 'heuristic' ? '启发式评估' : sugModel) : '评估当前规则完善程度' }}
+        </span>
+      </div>
+      <div class="o-row" style="gap: 10px; margin-bottom: 12px; align-items: center; flex-wrap: wrap">
+        <button v-if="!sugStreaming" class="o-btn o-btn--primary" @click="startSuggestion">
+          {{ sugLoaded ? '↻ 重新评估' : '▶ 智能巡检规则推荐' }}
+        </button>
+        <button v-else class="o-btn" disabled>评估中 {{ sugProgress }}%</button>
+        <span v-if="sugStreaming" class="spin" />
+        <span class="o-text-3" style="font-size: 12.5px">
+          由大模型评估当前规则覆盖完善程度并推荐可新增的规则项；未配置大模型时自动降级为启发式评估
+        </span>
+      </div>
+
+      <div v-if="sugErr" class="o-mono" style="color: var(--danger); font-size: 12.5px; margin-bottom: 10px">⚠ {{ sugErr }}</div>
+
+      <template v-if="sugAssessment || sugItems.length">
+        <div class="o-form-item">
+          <label class="o-form-item__label">完善度评估</label>
+          <textarea v-model="sugAssessment" class="o-textarea" rows="5"
+                    placeholder="规则完善度评估结论"></textarea>
+        </div>
+        <div class="sug-head">
+          <span class="o-text-3" style="font-size: 12.5px">
+            建议规则项（{{ sugItems.length }}），可直接编辑后逐条「接纳」跳转新增
+          </span>
+        </div>
+        <div class="o-table-wrap">
+          <table class="o-table">
+            <thead>
+              <tr>
+                <th style="width: 170px">规则名</th>
+                <th style="width: 96px">类型</th>
+                <th>匹配内容</th>
+                <th style="width: 96px">级别</th>
+                <th style="width: 170px">建议理由</th>
+                <th style="width: 130px"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="!sugItems.length">
+                <td colspan="6"><div class="o-empty" style="padding: 24px 0">未发现明显的规则覆盖缺口</div></td>
+              </tr>
+              <tr v-for="(it, i) in sugItems" :key="i">
+                <td><input v-model="it.name" class="o-input" /></td>
+                <td>
+                  <select v-model="it.matchType" class="o-select">
+                    <option value="keyword">关键字</option>
+                    <option value="regex">正则</option>
+                  </select>
+                </td>
+                <td><input v-model="it.pattern" class="o-input mono-input" /></td>
+                <td>
+                  <select v-model="it.severity" class="o-select">
+                    <option value="info">提示</option>
+                    <option value="warn">警告</option>
+                    <option value="error">错误</option>
+                    <option value="critical">严重</option>
+                  </select>
+                </td>
+                <td class="o-text-3 sug-reason">{{ it.reason || '—' }}</td>
+                <td class="actions">
+                  <button class="o-btn o-btn--primary o-btn--sm" @click="acceptItem(it)">接纳</button>
+                  <button class="o-btn o-btn--text o-btn--sm danger" @click="removeItem(i)">忽略</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
+      <div v-else-if="!sugStreaming && !sugErr" class="o-text-3" style="font-size: 13px">
+        点击上方按钮，让大模型评估当前规则完整度并给出可新增的规则项
+      </div>
+    </div>
   </template>
   <div v-else class="o-empty o-card">任务加载中…</div>
 </template>
@@ -411,5 +623,22 @@ onBeforeUnmount(stopPoll)
 }
 .fd-none {
   font-size: 12.5px;
+}
+.sug-head {
+  margin: 4px 0 10px;
+}
+.sug-reason {
+  font-size: 12px;
+  line-height: 1.6;
+}
+.mono-input {
+  font-family: var(--mono);
+}
+.actions {
+  white-space: nowrap;
+  text-align: right;
+}
+.actions .danger {
+  color: var(--danger);
 }
 </style>
