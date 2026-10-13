@@ -200,6 +200,39 @@ async function remove(row: RuleRow) {
     loadErr.value = apiError(e)
   }
 }
+
+/* ---------- 规则详情弹窗 (点击匹配内容查看完整信息; 脚本类型拉取源码) ---------- */
+const showDetail = ref(false)
+const detailRule = ref<RuleRow | null>(null)
+const scriptContent = ref('')
+const scriptLoading = ref(false)
+const scriptErr = ref('')
+
+async function openDetail(row: RuleRow) {
+  detailRule.value = row
+  scriptContent.value = ''
+  scriptErr.value = ''
+  showDetail.value = true
+  if (row.matchType === 'script' && row.scriptPath) {
+    scriptLoading.value = true
+    try {
+      const r = await get<{ path: string; content: string }>(
+        `/rules/scripts/content?path=${encodeURIComponent(row.scriptPath)}`)
+      scriptContent.value = r.content
+    } catch (e) {
+      scriptErr.value = apiError(e)
+    } finally {
+      scriptLoading.value = false
+    }
+  }
+}
+
+function editFromDetail() {
+  const r = detailRule.value
+  if (!r) return
+  showDetail.value = false
+  openEdit(r)
+}
 </script>
 
 <template>
@@ -235,12 +268,14 @@ async function remove(row: RuleRow) {
               <div v-if="r.description" class="o-text-3 desc">{{ r.description }}</div>
             </td>
             <td><span class="o-badge" :class="MATCH_BADGE[r.matchType]">{{ MATCH_LABEL[r.matchType] }}</span></td>
-            <td>
-              <span v-if="r.matchType === 'keyword' || r.matchType === 'regex'" class="o-mono pattern">{{ r.pattern || '—' }}</span>
-              <span v-else-if="r.matchType === 'threshold'" class="o-mono pattern">
-                {{ r.threshold?.metric }} {{ r.threshold?.op }} {{ r.threshold?.value }}
+            <td class="pattern-cell" title="点击查看完整规则信息" @click="openDetail(r)">
+              <span class="o-mono pattern pattern-link">
+                <template v-if="r.matchType === 'keyword' || r.matchType === 'regex'">{{ r.pattern || '—' }}</template>
+                <template v-else-if="r.matchType === 'threshold'">
+                  {{ r.threshold?.metric }} {{ r.threshold?.op }} {{ r.threshold?.value }}
+                </template>
+                <template v-else>{{ r.scriptPath || '—' }}</template>
               </span>
-              <span v-else class="o-mono pattern">{{ r.scriptPath || '—' }}</span>
             </td>
             <td><span class="o-badge" :class="SEV_BADGE[r.severity]">{{ SEV_LABEL[r.severity] }}</span></td>
             <td class="o-mono">{{ r.priority }}</td>
@@ -366,6 +401,79 @@ async function remove(row: RuleRow) {
       </div>
     </div>
   </div>
+
+  <!-- 规则详情弹窗 -->
+  <div v-if="showDetail && detailRule" class="o-modal-mask" @click.self="showDetail = false">
+    <div class="o-modal detail-modal">
+      <div class="o-modal__title">
+        规则详情
+        <span class="o-badge" :class="MATCH_BADGE[detailRule.matchType]" style="margin-left: 6px">
+          {{ MATCH_LABEL[detailRule.matchType] }}
+        </span>
+      </div>
+
+      <div class="detail-grid">
+        <div class="dt-k">名称</div>
+        <div class="dt-v">
+          <b>{{ detailRule.name }}</b>
+          <span v-if="detailRule.isBuiltin" class="o-badge o-badge--brand" style="margin-left: 6px">内置</span>
+        </div>
+        <div class="dt-k">描述</div>
+        <div class="dt-v">{{ detailRule.description || '—' }}</div>
+        <div class="dt-k">级别</div>
+        <div class="dt-v">
+          <span class="o-badge" :class="SEV_BADGE[detailRule.severity]">{{ SEV_LABEL[detailRule.severity] }}</span>
+        </div>
+        <div class="dt-k">优先级</div>
+        <div class="dt-v o-mono">{{ detailRule.priority }}</div>
+        <div class="dt-k">版本</div>
+        <div class="dt-v o-mono">v{{ detailRule.version }}</div>
+        <div class="dt-k">状态</div>
+        <div class="dt-v">
+          <span class="o-badge" :class="detailRule.enabled ? 'o-badge--success' : 'o-badge--grey'">
+            {{ detailRule.enabled ? '启用' : '停用' }}
+          </span>
+        </div>
+        <div class="dt-k">日志类型</div>
+        <div class="dt-v o-mono">{{ detailRule.logType || '不限' }}</div>
+        <div class="dt-k">服务器类型</div>
+        <div class="dt-v o-mono">{{ detailRule.serverType || '不限' }}</div>
+        <div class="dt-k">创建时间</div>
+        <div class="dt-v o-mono o-text-3">{{ fmtTime(detailRule.createdAt) }}</div>
+      </div>
+
+      <div class="dt-section-title">匹配内容</div>
+      <template v-if="detailRule.matchType === 'keyword' || detailRule.matchType === 'regex'">
+        <pre class="code-block">{{ detailRule.pattern || '（空）' }}</pre>
+      </template>
+      <template v-else-if="detailRule.matchType === 'threshold'">
+        <pre class="code-block">{{ detailRule.threshold?.metric }} {{ detailRule.threshold?.op }} {{ detailRule.threshold?.value }}</pre>
+      </template>
+      <template v-else>
+        <div class="dt-script-meta">
+          <span class="o-text-3">脚本路径</span>
+          <span class="o-mono">{{ detailRule.scriptPath || '—' }}</span>
+          <span class="o-text-3" style="margin-left: 12px">超时</span>
+          <span class="o-mono">{{ detailRule.scriptTimeout ? detailRule.scriptTimeout + 's' : '默认' }}</span>
+        </div>
+        <div
+          v-if="detailRule.scriptParams && Object.keys(detailRule.scriptParams).length"
+          class="dt-script-meta"
+        >
+          <span class="o-text-3">参数</span>
+          <span class="o-mono">{{ JSON.stringify(detailRule.scriptParams) }}</span>
+        </div>
+        <div v-if="scriptLoading" class="o-text-3" style="padding: 12px 0; font-size: 13px">脚本内容加载中…</div>
+        <div v-else-if="scriptErr" class="o-mono" style="color: var(--danger); font-size: 12.5px">⚠ {{ scriptErr }}</div>
+        <pre v-else class="code-block code-scroll">{{ scriptContent || '（脚本内容为空）' }}</pre>
+      </template>
+
+      <div class="o-modal__foot">
+        <button v-if="canManage" class="o-btn" @click="editFromDetail">编辑</button>
+        <button class="o-btn o-btn--primary" @click="showDetail = false">关闭</button>
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
@@ -426,5 +534,65 @@ async function remove(row: RuleRow) {
   font-size: 13.5px;
   color: var(--text-2);
   cursor: pointer;
+}
+.pattern-link {
+  cursor: pointer;
+  border-bottom: 1px dashed var(--border);
+}
+.pattern-link:hover {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+.pattern-cell {
+  cursor: pointer;
+}
+.detail-modal {
+  width: 760px;
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  row-gap: 9px;
+  column-gap: 12px;
+  font-size: 13px;
+}
+.dt-k {
+  color: var(--text-3);
+}
+.dt-v {
+  color: var(--text-2);
+  word-break: break-all;
+}
+.dt-section-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  margin: 16px 0 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.dt-script-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  margin-bottom: 8px;
+}
+.code-block {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-2);
+  background: #fbfcfe;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.code-scroll {
+  max-height: 420px;
+  overflow: auto;
 }
 </style>

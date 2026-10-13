@@ -92,6 +92,26 @@ async def list_rule_scripts(
     return out
 
 
+@router.get("/scripts/content")
+async def read_rule_script(
+    path: str,
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """读取脚本规则源码 (供前端查看脚本规则详情); 校验同脚本路径, 防止目录穿越."""
+    p = PurePosixPath(path.replace("\\", "/"))
+    if not path or p.is_absolute() or ".." in p.parts or p.suffix != ".py":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "非法脚本路径")
+    root = Path(get_settings().RULE_SCRIPT_DIR).resolve()
+    target = (root / p).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "脚本文件不存在")
+    try:
+        content = target.read_text(encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"脚本读取失败: {e}")
+    return {"path": p.name, "content": content}
+
+
 @router.get("", response_model=list[RuleInfo])
 async def list_rules(
     db: Annotated[AsyncSession, Depends(get_db)],
